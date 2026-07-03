@@ -364,11 +364,24 @@ class Manifest:
         duplicates = sorted({key for key in keys if keys.count(key) > 1})
         if duplicates:
             raise ValueError(f"duplicate task keys: {', '.join(duplicates)}")
+        worktrees = bool(obj.get("worktrees", False))
+        if worktrees:
+            reserved_logs_dir = (workdir / "logs").resolve()
+            collisions = []
+            for task in tasks:
+                taskdir = (workdir / task.key).resolve()
+                if taskdir == reserved_logs_dir or reserved_logs_dir in taskdir.parents:
+                    collisions.append(task.key)
+            if collisions:
+                raise ValueError(
+                    "task key(s) collide with reserved worktree logs directory "
+                    f"'logs': {', '.join(collisions)}"
+                )
         return cls(
             run_name=run_name,
             workdir=workdir,
             max_parallel=max_parallel,
-            worktrees=bool(obj.get("worktrees", False)),
+            worktrees=worktrees,
             repo=repo,
             tasks=tasks,
         )
@@ -789,7 +802,10 @@ class Verifier:
         )
         check_returncode, check_timed_out, output = await self._run_check(task.check, taskdir)
         ok = not missing_files and not check_timed_out and check_returncode == 0
-        if not ok and not check_timed_out and not output.strip():
+        if missing_files:
+            missing_message = f"[ringer] missing expected files: {', '.join(missing_files)}"
+            output = f"{missing_message}\n{output}" if output.strip() else missing_message
+        elif not check_timed_out and check_returncode != 0 and not output.strip():
             # A silent failing check wastes the retry (no failure context to
             # inject) and blinds the eval row. Say so, in both places.
             output = (
@@ -1173,10 +1189,13 @@ class RingerRunner:
 
     def _task_runtime(self, task: TaskSpec) -> TaskRuntime:
         taskdir = self._taskdir(task)
+        log_path = self._log_path(task, taskdir)
+        with contextlib.suppress(FileNotFoundError):
+            log_path.unlink()
         return TaskRuntime(
             task=task,
             taskdir=taskdir,
-            log_path=self._log_path(task, taskdir),
+            log_path=log_path,
             spec_short=shorten(task.spec, 120),
         )
 
@@ -1243,7 +1262,7 @@ def build_run_id(run_name: str) -> str:
 
 
 def find_repo_identity(start: Path | None = None) -> str | None:
-    """Per-repo agent identity: nearest .fleet-agent file walking up from cwd.
+    """Per-repo agent identity: nearest .fleet-agent file walking up from start.
 
     Jon's fleet convention (2026-07-02): each repo has its own agent name
     (projects.agent_name in the fleet DB); a .fleet-agent file in the repo
@@ -1263,11 +1282,17 @@ def find_repo_identity(start: Path | None = None) -> str | None:
     return None
 
 
-def resolve_identity(value: str | None, config: AppConfig) -> str:
+def resolve_identity(
+    value: str | None,
+    config: AppConfig,
+    identity_start_paths: Iterable[Path] = (),
+) -> str:
+    repo_identities = [find_repo_identity(start) for start in identity_start_paths]
     for candidate in (
         value,
         os.environ.get("FLEET_IDENTITY"),
         os.environ.get(f"{ENV_VAR_PREFIX}_IDENTITY"),
+        *repo_identities,
         find_repo_identity(),
         config.identity_default,
     ):
@@ -1763,7 +1788,10 @@ def main(argv: list[str] | None = None) -> int:
             manifest_path = args.manifest
         manifest = Manifest.from_path(manifest_path).with_max_parallel(args.max_parallel)
         validate_manifest_engines(manifest, config)
-        identity = resolve_identity(args.identity, config)
+        identity_start_paths = [manifest.workdir]
+        if manifest.source_path is not None:
+            identity_start_paths.append(manifest.source_path.parent)
+        identity = resolve_identity(args.identity, config, identity_start_paths)
         dashboard_enabled = not args.no_dashboard
         if args.dry_run:
             dry_run(

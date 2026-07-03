@@ -185,7 +185,7 @@
     .final { color: var(--muted); }
     .tasks {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(136px, 1fr));
+      grid-template-columns: repeat(auto-fill, minmax(152px, 1fr));
       gap: 8px;
       padding: 10px;
     }
@@ -193,13 +193,13 @@
       min-width: 0;
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
-      gap: 4px 6px;
+      gap: 5px 7px;
       align-items: center;
       border: 1px solid rgba(255,255,255,.08);
       border-left: 3px solid var(--gray);
       border-radius: 7px;
       background: rgba(255,255,255,.035);
-      padding: 7px;
+      padding: 8px;
     }
     .task.running, .task.retrying { border-left-color: var(--cyan); }
     .task.verifying { border-left-color: var(--amber); }
@@ -226,22 +226,43 @@
     .task.verifying .task-status { background: var(--amber); }
     .task.pass .task-status { background: var(--green); }
     .task.fail .task-status { background: var(--red); }
-    .task-elapsed, .children, .task-log {
+    .task-description, .task-activity, .task-meta {
+      grid-column: 1 / -1;
+      min-width: 0;
+    }
+    .task-description {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: #b8c4d6;
+      font-size: 11px;
+      line-height: 1.25;
+    }
+    .task-activity {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: #cbd6e8;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 10px;
+      line-height: 1.25;
+    }
+    .task-meta {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 6px;
+      align-items: center;
+    }
+    .task-elapsed, .children {
       color: var(--muted);
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 10px;
+      min-width: 0;
     }
     .children {
       text-align: right;
       color: #b9f3ff;
       font-weight: 800;
-    }
-    .task-log {
-      grid-column: 1 / -1;
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
     }
     @keyframes dotPulse {
       0% { box-shadow: 0 0 0 0 rgba(40,215,255,.62), 0 0 24px rgba(40,215,255,.86); }
@@ -402,6 +423,11 @@
       return tail.map(line => String(line).trim()).filter(Boolean).join(" / ");
     }
 
+    function taskActivityText(task, status, tail) {
+      const activity = String(task.activity || "").trim() || tail || status;
+      return `▸ ${activity}`;
+    }
+
     function createRunRecord(key) {
       const node = document.createElement("section");
       node.className = "run";
@@ -460,19 +486,25 @@
       const status = document.createElement("div");
       status.className = "task-status";
 
+      const description = document.createElement("div");
+      description.className = "task-description";
+
+      const activity = document.createElement("div");
+      activity.className = "task-activity";
+
+      const meta = document.createElement("div");
+      meta.className = "task-meta";
+
       const elapsed = document.createElement("div");
       elapsed.className = "task-elapsed";
 
       const children = document.createElement("div");
       children.className = "children";
 
-      const log = document.createElement("div");
-      log.className = "task-log";
-      log.hidden = true;
+      meta.append(elapsed, children);
+      node.append(name, status, description, activity, meta);
 
-      node.append(name, status, elapsed, children, log);
-
-      return {node, elements: {name, status, elapsed, children, log}};
+      return {node, elements: {name, status, description, activity, elapsed, children}};
     }
 
     function updateTaskRecord(record, task) {
@@ -485,17 +517,22 @@
       const children = numberOrZero(task.children);
       const name = task.key || "task";
       const title = task.engine ? `${name} / ${task.engine}` : name;
+      const description = String(task.spec_short || task.spec || "").trim();
+      const fullSpec = String(task.spec || task.spec_short || "").trim();
+      const activity = taskActivityText(task, status, tail);
 
-      const taskClass = `task ${safeClass(status, "queued")}${tail ? " has-log" : ""}`;
+      const taskClass = `task ${safeClass(status, "queued")}${activity ? " has-activity" : ""}`;
       if (record.node.className !== taskClass) record.node.className = taskClass;
       setText(record.elements.name, name);
       setTitle(record.elements.name, title);
       setText(record.elements.status, status);
+      setText(record.elements.description, description);
+      setTitle(record.elements.description, fullSpec || description);
+      setHidden(record.elements.description, description.length === 0);
+      setText(record.elements.activity, activity);
+      setTitle(record.elements.activity, activity);
       setText(record.elements.elapsed, elapsed);
       setText(record.elements.children, children > 0 ? `p${children}` : "");
-      setText(record.elements.log, tail);
-      setTitle(record.elements.log, tail);
-      setHidden(record.elements.log, tail.length === 0);
     }
 
     function updateRunRecord(record, run) {

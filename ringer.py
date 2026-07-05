@@ -1076,6 +1076,47 @@ def fmt_datetime(value: str) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
+def fmt_compact_duration(seconds: Any) -> str:
+    try:
+        total = max(0, int(float(seconds or 0)))
+    except (TypeError, ValueError):
+        total = 0
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    parts: list[str] = []
+    if h:
+        parts.append(f"{h}h")
+    if m:
+        parts.append(f"{m}m")
+    if s or not parts:
+        parts.append(f"{s}s")
+    return " ".join(parts)
+
+
+def fmt_plain_ago(seconds: Any) -> str:
+    try:
+        total = max(0, int(float(seconds or 0)))
+    except (TypeError, ValueError):
+        total = 0
+    if total < 60:
+        return f"{total} second{'s' if total != 1 else ''}"
+    minutes, seconds_left = divmod(total, 60)
+    if minutes < 60:
+        if seconds_left == 0:
+            return f"{minutes} minute{'s' if minutes != 1 else ''}"
+        return (
+            f"{minutes} minute{'s' if minutes != 1 else ''} "
+            f"{seconds_left} second{'s' if seconds_left != 1 else ''}"
+        )
+    hours, minutes_left = divmod(minutes, 60)
+    if minutes_left == 0:
+        return f"{hours} hour{'s' if hours != 1 else ''}"
+    return (
+        f"{hours} hour{'s' if hours != 1 else ''} "
+        f"{minutes_left} minute{'s' if minutes_left != 1 else ''}"
+    )
+
+
 ARTIFACT_BASE_CSS = """
   * { box-sizing: border-box; }
   html, body {
@@ -1086,6 +1127,13 @@ ARTIFACT_BASE_CSS = """
   }
   .wrap { max-width: 1200px; margin: 0 auto; padding: 22px 18px 48px; }
   h1 { font-size: 21px; letter-spacing: .02em; text-transform: uppercase; margin: 0 0 4px; }
+  h2 { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; margin: 20px 0 8px; color: #8f9db2; }
+  .briefing { color: #eef4ff; font-size: 18px; line-height: 1.45; margin: 0; max-width: 900px; }
+  .updates { list-style: none; padding: 0; margin: 0 0 18px; display: grid; gap: 6px; }
+  .updates li { color: #cbd6e8; font-size: 13px; line-height: 1.45; }
+  .updates time { color: #8f9db2; font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin-right: 8px; }
+  .technical-detail { margin-top: 18px; border-top: 1px solid rgba(255,255,255,.08); padding-top: 12px; }
+  .technical-detail > summary { font-size: 13px; font-weight: 800; }
   .meta { color: #8f9db2; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin-bottom: 16px; line-height: 1.7; }
   .meta b { color: #cbd6e8; }
   table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
@@ -1125,6 +1173,10 @@ class ArtifactRenderer:
     def __init__(self, artifact_path: Path) -> None:
         self.artifact_dir = artifact_path.parent
         self._wrapper_cache: dict[tuple[Path, Path], tuple[int, int]] = {}
+        self._last_task_status: dict[str, str] = {}
+        self._last_run_state: str | None = None
+        self._seen_transition_keys: set[tuple[str, str]] = set()
+        self._transition_log: list[dict[str, str]] = []
 
     def render_status_html(self, state: dict[str, Any]) -> str:
         return render_status_html(state, renderer=self, force_wrappers=False)
@@ -1134,6 +1186,47 @@ class ArtifactRenderer:
 
     def render_artifact_index_html(self, entries: list[dict[str, Any]]) -> str:
         return render_artifact_index_html(entries, renderer=self, force_wrappers=False)
+
+    def transition_feed(self, state: dict[str, Any], *, limit: int | None = None) -> list[dict[str, str]]:
+        self.record_transitions(state)
+        if limit is None:
+            return list(reversed(self._transition_log))
+        return list(reversed(self._transition_log[-limit:]))
+
+    def record_transitions(self, state: dict[str, Any]) -> None:
+        run_state = str(state.get("state", "live"))
+        if self._last_run_state is None:
+            if run_state == "live":
+                self._append_transition(("run", "live"), "Ringer started")
+        elif self._last_run_state != run_state and run_state == "finished":
+            self._append_transition(("run", "finished"), "Ringer finished")
+        self._last_run_state = run_state
+
+        current_status: dict[str, str] = {}
+        tasks = state.get("tasks") or []
+        if not isinstance(tasks, list):
+            tasks = []
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            task_key = str(task.get("key", "task"))
+            status = str(task.get("status", "queued"))
+            previous = self._last_task_status.get(task_key)
+            current_status[task_key] = status
+            if previous == status:
+                continue
+            line = plain_transition_line(task_key, previous, status, task)
+            if line:
+                self._append_transition((task_key, status), line)
+        self._last_task_status = current_status
+
+    def _append_transition(self, key: tuple[str, str], line: str) -> None:
+        if key in self._seen_transition_keys:
+            return
+        self._seen_transition_keys.add(key)
+        self._transition_log.append(
+            {"time": datetime.now().strftime("%H:%M:%S"), "line": line}
+        )
 
     def link_for_source(
         self,
@@ -1242,6 +1335,208 @@ def render_file_wrapper_html(
 """
 
 
+def state_tasks(state: dict[str, Any]) -> list[dict[str, Any]]:
+    tasks = state.get("tasks") or []
+    if not isinstance(tasks, list):
+        return []
+    return [task for task in tasks if isinstance(task, dict)]
+
+
+def task_status_counts(state: dict[str, Any]) -> dict[str, int]:
+    tasks = state_tasks(state)
+    running_statuses = {"running", "verifying", "retrying"}
+    pass_n = sum(1 for task in tasks if str(task.get("status")) == "pass")
+    fail_n = sum(1 for task in tasks if str(task.get("status")) == "fail")
+    running_n = sum(1 for task in tasks if str(task.get("status")) in running_statuses)
+    task_count = len(tasks)
+    waiting_n = max(0, task_count - pass_n - fail_n - running_n)
+    return {
+        "total": task_count,
+        "pass": pass_n,
+        "fail": fail_n,
+        "running": running_n,
+        "waiting": waiting_n,
+    }
+
+
+def task_word(count: int) -> str:
+    return "task" if count == 1 else "tasks"
+
+
+def passed_phrase(count: int) -> str:
+    if count == 1:
+        return "1 passed its check"
+    return f"{count} passed their checks"
+
+
+def failed_phrase(count: int) -> str:
+    if count == 1:
+        return "1 failed its check"
+    return f"{count} failed their checks"
+
+
+def running_phrase(count: int) -> str:
+    if count == 1:
+        return "1 is running"
+    return f"{count} are running"
+
+
+def waiting_phrase(count: int) -> str:
+    if count == 1:
+        return "1 is waiting"
+    return f"{count} are waiting"
+
+
+def live_briefing_sentence(state: dict[str, Any]) -> str:
+    counts = task_status_counts(state)
+    identity = str(state.get("identity") or "this machine")
+    elapsed = fmt_plain_ago(state.get("elapsed_s"))
+    total = counts["total"]
+    if total == 0:
+        return f"Ringer has no tasks for {identity}. Started {elapsed} ago."
+    status_sentence = ", ".join(
+        [
+            passed_phrase(counts["pass"]),
+            failed_phrase(counts["fail"]),
+            running_phrase(counts["running"]),
+            waiting_phrase(counts["waiting"]),
+        ]
+    )
+    return (
+        f"Ringer is working on {total} {task_word(total)} for {identity}. "
+        f"{status_sentence}, started {elapsed} ago."
+    )
+
+
+def final_briefing_sentence(state: dict[str, Any]) -> str:
+    counts = task_status_counts(state)
+    total = counts["total"]
+    pass_n = counts["pass"]
+    fail_n = counts["fail"]
+    elapsed = fmt_compact_duration(state.get("elapsed_s"))
+    first = f"Ringer finished {total} {task_word(total)} in {elapsed}."
+    if fail_n == 0:
+        return f"{first} All {total} passed their checks."
+    return f"{first} {pass_n} passed, {fail_n} failed even after a retry."
+
+
+def plain_transition_line(
+    task_key: str,
+    previous_status: str | None,
+    status: str,
+    task: dict[str, Any],
+) -> str | None:
+    attempts = int(task.get("attempts") or 0)
+    timed_out = bool(task.get("check_timed_out")) or status == "timeout"
+    if status == "running" and previous_status in {None, "queued"}:
+        return f"{task_key} started"
+    if status == "retrying":
+        if timed_out:
+            return f"{task_key} timed out — sending it back to try again"
+        return f"{task_key} failed its check — sending it back to try again"
+    if status == "pass":
+        if attempts > 1:
+            return f"{task_key} passed on the second try"
+        return f"{task_key} finished — checked and passed, {fmt_compact_duration(task.get('elapsed_s'))}"
+    if status == "fail":
+        if timed_out:
+            return f"{task_key} timed out"
+        if attempts > 1:
+            return f"{task_key} failed its check after the second try"
+        return f"{task_key} failed its check"
+    if status == "timeout":
+        return f"{task_key} timed out"
+    return None
+
+
+def render_status_updates(updates: list[dict[str, str]]) -> str:
+    if not updates:
+        return '<p class="muted">No updates yet.</p>'
+    items = []
+    for update in updates:
+        stamp = html_escape(str(update.get("time", "")))
+        line = html_escape(str(update.get("line", "")))
+        items.append(f'<li><time>{stamp}</time>{line}</li>')
+    return '<ol class="updates">' + "".join(items) + "</ol>"
+
+
+def render_live_technical_detail(
+    *,
+    run_name: str,
+    identity: str,
+    run_state: str,
+    dot_color: str,
+    started: str,
+    elapsed: str,
+    done_n: Any,
+    task_count: int,
+    pass_n: Any,
+    fail_n: Any,
+    max_parallel: Any,
+    tokens: int,
+    report_note: str,
+    rows: str,
+) -> str:
+    return f"""<details class="technical-detail">
+    <summary>Technical detail</summary>
+    <h1><span class="top-dot" style="background:{dot_color};color:{dot_color}"></span>{run_name}</h1>
+    <div class="meta">
+      identity <b>{identity}</b> &middot; state <b>{html_escape(run_state)}</b> &middot;
+      started <b>{started}</b> &middot; elapsed <b>{elapsed}</b> &middot;
+      <b>{done_n}/{task_count}</b> done ({pass_n} pass / {fail_n} fail) &middot;
+      max_parallel <b>{max_parallel}</b> &middot; tokens <b>{tokens:,}</b>
+    </div>
+    {report_note}
+    <table>
+      <thead><tr><th>Task</th><th>Status</th><th>Attempts</th><th>Duration</th><th>Check</th><th>Spec</th><th>Links</th></tr></thead>
+      <tbody>
+        {rows}
+      </tbody>
+    </table>
+  </details>"""
+
+
+def render_final_technical_detail(
+    *,
+    run_name: str,
+    identity: str,
+    started: str,
+    elapsed: str,
+    pass_n: int,
+    fail_n: int,
+    task_count: int,
+    tokens: int,
+    max_parallel: Any,
+    overall: str,
+    overall_color: str,
+    run_id: str,
+    rows: str,
+) -> str:
+    return f"""<details class="technical-detail" open>
+    <summary>Technical detail</summary>
+    <h1><span class="top-dot" style="background:{overall_color};color:{overall_color}"></span>{run_name} &mdash; final report</h1>
+    <div class="meta">
+      identity <b>{identity}</b> &middot; overall <b>{overall}</b> &middot;
+      started <b>{started}</b> &middot; elapsed <b>{elapsed}</b> &middot;
+      <b>{pass_n}/{task_count}</b> pass ({fail_n} fail) &middot;
+      max_parallel <b>{max_parallel}</b> &middot; tokens <b>{tokens:,}</b> &middot;
+      run_id <span class="mono">{run_id}</span>
+    </div>
+    <table>
+      <thead><tr>
+        <th>Task</th><th>Verdict</th><th>Attempts</th><th>Duration</th><th>Tokens</th>
+        <th>Check</th><th>Spec preview</th><th>Links</th>
+      </tr></thead>
+      <tbody>
+        {rows}
+      </tbody>
+    </table>
+    <p class="meta">Generated by ringer.py (zero-LLM Tier 0 artifact) at run completion. Spec text
+    is truncated to 200 chars in this report by design (task specs may embed paths from other
+    tasks); see the task's own worker.log / report files linked above for full detail.</p>
+  </details>"""
+
+
 def render_status_html(
     state: dict[str, Any],
     renderer: ArtifactRenderer | None = None,
@@ -1259,10 +1554,12 @@ def render_status_html(
     pass_n = totals.get("pass", state.get("pass", 0))
     fail_n = totals.get("fail", state.get("fail", 0))
     done_n = totals.get("done", pass_n + fail_n)
-    tasks = state.get("tasks") or []
+    tasks = state_tasks(state)
     task_count = len(tasks)
     max_parallel = state.get("max_parallel", "?")
     tokens = int(totals.get("tokens", state.get("tokens", 0)) or 0)
+    briefing = html_escape(live_briefing_sentence(state))
+    updates = renderer.transition_feed(state, limit=50) if renderer else []
 
     rows = "".join(
         render_status_row(task, state=state, renderer=renderer, force_wrappers=force_wrappers)
@@ -1289,6 +1586,23 @@ def render_status_html(
             f'<a href="{html_escape(report_href)}">{html_escape(str(report_path))}</a></p>'
         )
 
+    technical_detail = render_live_technical_detail(
+        run_name=run_name,
+        identity=identity,
+        run_state=run_state,
+        dot_color=dot_color,
+        started=started,
+        elapsed=elapsed,
+        done_n=done_n,
+        task_count=task_count,
+        pass_n=pass_n,
+        fail_n=fail_n,
+        max_parallel=max_parallel,
+        tokens=tokens,
+        report_note=report_note,
+        rows=rows,
+    )
+
     refresh = "" if state.get("finished") else '<meta http-equiv="refresh" content="5">'
     return f"""<!doctype html>
 <html lang="en">
@@ -1300,20 +1614,15 @@ def render_status_html(
 </head>
 <body>
 <div class="wrap">
-  <h1><span class="top-dot" style="background:{dot_color};color:{dot_color}"></span>{run_name}</h1>
-  <div class="meta">
-    identity <b>{identity}</b> &middot; state <b>{html_escape(run_state)}</b> &middot;
-    started <b>{started}</b> &middot; elapsed <b>{elapsed}</b> &middot;
-    <b>{done_n}/{task_count}</b> done ({pass_n} pass / {fail_n} fail) &middot;
-    max_parallel <b>{max_parallel}</b> &middot; tokens <b>{tokens:,}</b>
-  </div>
-  {report_note}
-  <table>
-    <thead><tr><th>Task</th><th>Status</th><th>Attempts</th><th>Duration</th><th>Check</th><th>Spec</th><th>Links</th></tr></thead>
-    <tbody>
-      {rows}
-    </tbody>
-  </table>
+  <section aria-labelledby="right-now-heading">
+    <h2 id="right-now-heading">Right now</h2>
+    <p class="briefing">{briefing}</p>
+  </section>
+  <section aria-labelledby="status-updates-heading">
+    <h2 id="status-updates-heading">Status updates</h2>
+    {render_status_updates(updates)}
+  </section>
+  {technical_detail}
 </div>
 </body>
 </html>
@@ -1374,21 +1683,39 @@ def render_final_report_html(
     started = fmt_datetime(str(state.get("started_at", "")))
     elapsed = fmt_duration(state.get("elapsed_s"))
     totals = state.get("totals") or {}
-    pass_n = totals.get("pass", state.get("pass", 0))
-    fail_n = totals.get("fail", state.get("fail", 0))
-    tasks = state.get("tasks") or []
+    tasks = state_tasks(state)
+    counts = task_status_counts(state)
+    pass_n = counts["pass"]
+    fail_n = counts["fail"]
     task_count = len(tasks)
     tokens = int(totals.get("tokens", state.get("tokens", 0)) or 0)
     max_parallel = state.get("max_parallel", "?")
     overall = "PASS" if fail_n == 0 else "FAIL"
     overall_color = status_color("pass" if fail_n == 0 else "fail")
     run_id = html_escape(str(state.get("run_id", "")))
+    briefing = html_escape(final_briefing_sentence(state))
+    updates = renderer.transition_feed(state, limit=None) if renderer else []
 
     rows = "".join(
         render_report_row(task, state=state, renderer=renderer, force_wrappers=force_wrappers)
         for task in tasks
     ) or (
         '<tr><td colspan="8" class="muted">no tasks</td></tr>'
+    )
+    technical_detail = render_final_technical_detail(
+        run_name=run_name,
+        identity=identity,
+        started=started,
+        elapsed=elapsed,
+        pass_n=pass_n,
+        fail_n=fail_n,
+        task_count=task_count,
+        tokens=tokens,
+        max_parallel=max_parallel,
+        overall=overall,
+        overall_color=overall_color,
+        run_id=run_id,
+        rows=rows,
     )
 
     return f"""<!doctype html>
@@ -1400,26 +1727,15 @@ def render_final_report_html(
 </head>
 <body>
 <div class="wrap">
-  <h1><span class="top-dot" style="background:{overall_color};color:{overall_color}"></span>{run_name} &mdash; final report</h1>
-  <div class="meta">
-    identity <b>{identity}</b> &middot; overall <b>{overall}</b> &middot;
-    started <b>{started}</b> &middot; elapsed <b>{elapsed}</b> &middot;
-    <b>{pass_n}/{task_count}</b> pass ({fail_n} fail) &middot;
-    max_parallel <b>{max_parallel}</b> &middot; tokens <b>{tokens:,}</b> &middot;
-    run_id <span class="mono">{run_id}</span>
-  </div>
-  <table>
-    <thead><tr>
-      <th>Task</th><th>Verdict</th><th>Attempts</th><th>Duration</th><th>Tokens</th>
-      <th>Check</th><th>Spec preview</th><th>Links</th>
-    </tr></thead>
-    <tbody>
-      {rows}
-    </tbody>
-  </table>
-  <p class="meta">Generated by ringer.py (zero-LLM Tier 0 artifact) at run completion. Spec text
-  is truncated to 200 chars in this report by design (task specs may embed paths from other
-  tasks); see the task's own worker.log / report files linked above for full detail.</p>
+  <section aria-labelledby="what-happened-heading">
+    <h2 id="what-happened-heading">What happened</h2>
+    <p class="briefing">{briefing}</p>
+  </section>
+  <section aria-labelledby="status-updates-heading">
+    <h2 id="status-updates-heading">Status updates</h2>
+    {render_status_updates(updates)}
+  </section>
+  {technical_detail}
 </div>
 </body>
 </html>

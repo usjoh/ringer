@@ -142,7 +142,7 @@ class ArtifactEndstateTests(unittest.TestCase):
         )
 
         self.assertIn('<meta http-equiv="refresh" content="2">', html)
-        self.assertIn("this page refreshes itself", html)
+        self.assertIn("This page updates itself while the work runs.", html)
 
     def test_retry_update_quotes_first_check_output_line(self) -> None:
         render_status_html(
@@ -165,10 +165,10 @@ class ArtifactEndstateTests(unittest.TestCase):
         )
 
         self.assertIn(
-            "task-one did not pass its check — sending it back. "
-            "The check reported: &quot;FAIL: missing &lt;report&gt;&quot;",
+            "task-one didn&#x27;t finish cleanly — sent back to redo the work.",
             html,
         )
+        self.assertIn('<p class="catch"><b>Caught:</b> FAIL: missing &lt;report&gt;</p>', html)
 
     def test_second_try_pass_and_final_fail_updates_include_outcome(self) -> None:
         render_status_html(
@@ -215,10 +215,10 @@ class ArtifactEndstateTests(unittest.TestCase):
             renderer=other_renderer,
         )
         self.assertIn(
-            "task-two could not finish — its check reported: "
-            "&quot;FAIL: still missing output&quot;",
+            "task-two could not finish.",
             fail_html,
         )
+        self.assertIn('<p class="catch"><b>Caught:</b> FAIL: still missing output</p>', fail_html)
 
     def test_running_task_activity_line_is_optional(self) -> None:
         html = render_status_html(
@@ -231,8 +231,8 @@ class ArtifactEndstateTests(unittest.TestCase):
             renderer=self.renderer,
         )
 
-        self.assertIn('<span class="task-activity" title="edited report.md">edited report.md</span>', html)
-        self.assertEqual(1, html.count('class="task-activity"'))
+        self.assertIn('<span class="activity" title="edited report.md">edited report.md</span>', html)
+        self.assertEqual(1, html.count('class="activity"'))
 
     def test_task_rows_include_checklist_glyph_css(self) -> None:
         html = render_status_html(
@@ -247,10 +247,10 @@ class ArtifactEndstateTests(unittest.TestCase):
             renderer=self.renderer,
         )
 
-        self.assertIn(".task-row.state-pass::before", html)
-        self.assertIn(".task-row.state-running::before", html)
-        self.assertIn(".task-row.state-waiting::before", html)
-        self.assertIn(".task-row.state-fail::before", html)
+        self.assertIn(".glyph.pass", html)
+        self.assertIn(".glyph.working", html)
+        self.assertIn(".glyph.waiting", html)
+        self.assertIn(".glyph.retry, .glyph.fail", html)
 
 
 if __name__ == "__main__":

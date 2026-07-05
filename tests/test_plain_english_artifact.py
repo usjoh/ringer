@@ -76,9 +76,9 @@ class PlainEnglishArtifactTests(unittest.TestCase):
             renderer=self.renderer,
         )
 
-        self.assertIn("Ringer is working on 4 tasks.", html)
+        self.assertIn("Ringer is working on 4 tasks —", html)
         self.assertIn(
-            "1 finished cleanly, 1 failed, 1 is running, 1 is waiting",
+            '1 finished and checked</span>, 1 working, 1 is waiting, and <span class="n-fail">1 failed</span>',
             html,
         )
 
@@ -90,9 +90,9 @@ class PlainEnglishArtifactTests(unittest.TestCase):
 
         self.assertRegex(
             html,
-            r'<div class="wrap">\s*<header class="page-head">\s*'
-            r'<p class="eyebrow"[^>]*>Plain English Run</p>\s*'
-            r'<p id="right-now-heading" class="briefing">',
+            r'(?s)<div class="page">\s*<header class="corner">.*?'
+            r'<span class="eyebrow">Ringer &nbsp;·&nbsp; <b>Plain English Run</b>.*?'
+            r'<h1 id="right-now-heading" class="briefing">',
         )
 
     def test_segmented_bar_has_one_segment_per_task_with_state_class(self) -> None:
@@ -108,12 +108,14 @@ class PlainEnglishArtifactTests(unittest.TestCase):
             renderer=self.renderer,
         )
 
-        self.assertEqual(4, html.count('class="progress-segment '))
-        self.assertEqual(1, html.count('class="progress-segment state-pass"'))
-        self.assertEqual(1, html.count('class="progress-segment state-fail"'))
-        self.assertEqual(1, html.count('class="progress-segment state-running"'))
-        self.assertEqual(1, html.count('class="progress-segment state-waiting"'))
-        self.assertIn("1 finished &middot; 1 running &middot; 1 waiting &middot; 1 failed", html)
+        rounds = re.search(r'<div class="rounds"[^>]*>(.*?)</div>', html, re.S)
+        self.assertIsNotNone(rounds)
+        self.assertEqual(4, rounds.group(1).count("<span"))
+        self.assertEqual(1, rounds.group(1).count('class="pass"'))
+        self.assertEqual(1, rounds.group(1).count('class="fail"'))
+        self.assertEqual(1, rounds.group(1).count('class="working"'))
+        self.assertIn("<span aria-label=\"D-waiting: waiting\"></span>", rounds.group(1))
+        self.assertIn("1 finished · 1 working · 1 failed · 1 waiting", html)
 
     def test_status_change_adds_timestamped_update(self) -> None:
         render_status_html(self.state([self.task("A-mock-engine", "queued")]), renderer=self.renderer)
@@ -123,7 +125,7 @@ class PlainEnglishArtifactTests(unittest.TestCase):
             renderer=self.renderer,
         )
 
-        self.assertRegex(html, r'<time class="mono">\d{2}:\d{2}:\d{2}</time><span>A-mock-engine started</span>')
+        self.assertRegex(html, r'<time class="mono">\d{2}:\d{2}:\d{2}</time><div>A-mock-engine started</div>')
 
     def test_retry_and_second_try_updates(self) -> None:
         render_status_html(
@@ -206,8 +208,8 @@ class PlainEnglishArtifactTests(unittest.TestCase):
             renderer=self.renderer,
         )
 
-        self.assertIn(":root[data-theme=dark]", html)
-        self.assertIn(":root[data-theme=light]", html)
+        self.assertIn(':root[data-theme="dark"]', html)
+        self.assertIn(':root[data-theme="light"]', html)
 
     def test_final_report_all_pass_briefing(self) -> None:
         html = render_final_report_html(
@@ -225,7 +227,7 @@ class PlainEnglishArtifactTests(unittest.TestCase):
         )
 
         self.assertIn(
-            "Ringer finished 4 tasks in 5m 30s. All 4 finished cleanly.",
+            'Ringer finished 4 tasks in 5m 30s. <span class="n-pass">All 4 finished and checked.</span>',
             html,
         )
         self.assertIn("Finished ", html)

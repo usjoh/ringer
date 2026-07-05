@@ -126,7 +126,7 @@ class ArtifactLibraryTests(unittest.TestCase):
         second = live_path.read_text(encoding="utf-8")
         self.assertEqual(live_path, artifact_live_path(self.state_dir, "Library Run"))
         self.assertNotEqual(first, second)
-        self.assertIn("finished cleanly", second)
+        self.assertIn("finished and checked", second)
 
     def test_finished_run_appends_version_and_updates_state(self) -> None:
         runtime = self.runtime(status="pass")

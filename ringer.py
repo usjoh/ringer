@@ -1479,53 +1479,43 @@ def fmt_plain_ago(seconds: Any) -> str:
 ARTIFACT_BASE_CSS = """
   :root {
     color-scheme: dark;
-    --ground:#0a0d13;
-    --surface:#11161f;
-    --ink:#e8eef8;
-    --muted:#8fa0b5;
-    --accent:#2fd0ff;
-    --pass:#3ddc84;
-    --fail:#ff5d5d;
-    --running:#2fd0ff;
-    --waiting:#8fa0b5;
+    --ground: #0b0e14;
+    --surface: #141a26;
+    --ink: #e9eef7;
+    --muted: #8fa0b6;
+    --hairline: rgba(143, 160, 182, .22);
+    --accent: #35d0ff;
+    --pass: #45d17e;
+    --fail: #ff5f6b;
+    --waiting: #6f7c92;
+    --quote-bg: rgba(255, 95, 107, .08);
   }
   @media (prefers-color-scheme: light) {
     :root {
       color-scheme: light;
-      --ground:#f5f7fa;
-      --surface:#ffffff;
-      --ink:#16202c;
-      --muted:#5c6b7d;
-      --accent:#0092c8;
-      --pass:#1f9d5a;
-      --fail:#c93434;
-      --running:#007fae;
-      --waiting:#5c6b7d;
+      --ground: #f2f5f9;
+      --surface: #ffffff;
+      --ink: #17202e;
+      --muted: #5a6a7e;
+      --hairline: rgba(90, 106, 126, .28);
+      --accent: #007fb0;
+      --pass: #178a4c;
+      --fail: #cc3340;
+      --waiting: #7d8ba0;
+      --quote-bg: rgba(204, 51, 64, .07);
     }
   }
-  :root[data-theme=dark] {
+  :root[data-theme="dark"] {
     color-scheme: dark;
-    --ground:#0a0d13;
-    --surface:#11161f;
-    --ink:#e8eef8;
-    --muted:#8fa0b5;
-    --accent:#2fd0ff;
-    --pass:#3ddc84;
-    --fail:#ff5d5d;
-    --running:#2fd0ff;
-    --waiting:#8fa0b5;
+    --ground: #0b0e14; --surface: #141a26; --ink: #e9eef7; --muted: #8fa0b6;
+    --hairline: rgba(143,160,182,.22); --accent: #35d0ff; --pass: #45d17e;
+    --fail: #ff5f6b; --waiting: #6f7c92; --quote-bg: rgba(255,95,107,.08);
   }
-  :root[data-theme=light] {
+  :root[data-theme="light"] {
     color-scheme: light;
-    --ground:#f5f7fa;
-    --surface:#ffffff;
-    --ink:#16202c;
-    --muted:#5c6b7d;
-    --accent:#0092c8;
-    --pass:#1f9d5a;
-    --fail:#c93434;
-    --running:#007fae;
-    --waiting:#5c6b7d;
+    --ground: #f2f5f9; --surface: #ffffff; --ink: #17202e; --muted: #5a6a7e;
+    --hairline: rgba(90,106,126,.28); --accent: #007fb0; --pass: #178a4c;
+    --fail: #cc3340; --waiting: #7d8ba0; --quote-bg: rgba(204,51,64,.07);
   }
   * { box-sizing: border-box; }
   html, body {
@@ -1535,98 +1525,201 @@ ARTIFACT_BASE_CSS = """
     background: var(--ground);
     color: var(--ink);
     font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    line-height: 1.5;
   }
-  .wrap {
-    width: 100%;
-    padding: clamp(16px,4vw,48px);
+  body {
+    padding: clamp(18px, 4vw, 52px);
   }
-  .page-head {
-    margin: 0 0 clamp(18px,4vw,32px);
+  .page {
+    max-width: 860px;
+    margin: 0 auto;
+  }
+  .corner {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: clamp(14px, 3vw, 26px);
+  }
+  .live-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--accent);
+    align-self: center;
+    flex: 0 0 9px;
+  }
+  .live-dot.pass { background: var(--pass); }
+  .live-dot.fail, .live-dot.retry { background: var(--fail); }
+  .live-dot.waiting { background: var(--waiting); }
+  @media (prefers-reduced-motion: no-preference) {
+    .live-dot.is-live { animation: pulse 1.4s ease-in-out infinite; }
+    @keyframes pulse { 50% { opacity: .35; } }
   }
   .eyebrow {
-    max-width: 65ch;
-    margin: 0 0 8px;
-    overflow: hidden;
     color: var(--muted);
     font-size: 12px;
     font-weight: 700;
-    line-height: 1.3;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+  }
+  .eyebrow b {
+    color: var(--ink);
+  }
+  .clock {
+    margin-left: auto;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .briefing {
+    max-width: 30ch;
+    margin: 0 0 clamp(16px, 3vw, 24px);
+    font-size: clamp(20px, 3.4vw, 30px);
+    font-weight: 800;
+    letter-spacing: 0;
+    line-height: 1.25;
+    text-wrap: balance;
+  }
+  .briefing .n-pass { color: var(--pass); }
+  .briefing .n-fail { color: var(--fail); }
+  .rounds {
+    display: flex;
+    gap: 5px;
+    margin-bottom: 8px;
+  }
+  .rounds span {
+    flex: 1;
+    height: 7px;
+    border-radius: 4px;
+    background: var(--waiting);
+    opacity: .45;
+  }
+  .rounds .pass { background: var(--pass); opacity: 1; }
+  .rounds .working { background: var(--accent); opacity: 1; }
+  .rounds .retry, .rounds .fail { background: var(--fail); opacity: 1; }
+  @media (prefers-reduced-motion: no-preference) {
+    .rounds .working, .rounds .retry { animation: pulse 1.4s ease-in-out infinite; }
+  }
+  .legend {
+    margin: 0;
+    margin-bottom: clamp(26px, 5vw, 40px);
+    color: var(--muted);
+    font-size: 12.5px;
+  }
+  section h2 {
+    margin: 0 0 4px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--hairline);
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+  }
+  .timeline {
+    margin-bottom: clamp(28px, 5vw, 44px);
+  }
+  .tl-row {
+    display: grid;
+    grid-template-columns: 76px minmax(0,1fr);
+    gap: 14px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--hairline);
+    font-size: 14px;
+  }
+  .tl-row time {
+    color: var(--muted);
+    font-size: 12px;
+    padding-top: 2px;
+  }
+  .tl-row .catch {
+    margin: 6px 0 0;
+    padding: 8px 12px;
+    background: var(--quote-bg);
+    border-left: 2px solid var(--fail);
+    border-radius: 0 6px 6px 0;
+    color: var(--muted);
+    font-size: 13px;
+    overflow-wrap: break-word;
+  }
+  .tl-row .catch b {
+    color: var(--fail);
+    font-weight: 650;
+  }
+  .workers {
+    margin-bottom: clamp(28px, 5vw, 44px);
+  }
+  .worker {
+    display: grid;
+    grid-template-columns: 18px minmax(0,1fr) auto auto;
+    gap: 4px 12px;
+    align-items: baseline;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--hairline);
+  }
+  .glyph {
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    align-self: center;
+  }
+  .glyph.pass { background: var(--pass); }
+  .glyph.working { background: var(--accent); }
+  .glyph.retry, .glyph.fail { background: var(--fail); }
+  .glyph.waiting {
+    background: transparent;
+    border: 1.5px solid var(--waiting);
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .glyph.working, .glyph.retry { animation: pulse 1.4s ease-in-out infinite; }
+  }
+  .worker .name {
+    min-width: 0;
+    overflow: hidden;
+    font-size: 15px;
+    font-weight: 650;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .page-title {
-    max-width: 65ch;
-    margin: 0 0 10px;
-    overflow-wrap: anywhere;
-    color: var(--ink);
-    font-size: clamp(20px,4vw,32px);
-    font-weight: 800;
-    letter-spacing: 0;
-    line-height: 1.05;
-  }
-  .briefing {
-    max-width: 65ch;
-    margin: 0;
-    color: var(--ink);
-    font-size: clamp(16px,2.6vw,22px);
+  .worker .state {
+    font-size: 13px;
     font-weight: 650;
-    line-height: 1.35;
-    text-wrap: balance;
+    white-space: nowrap;
   }
-  .progress-wrap {
-    margin: 0 0 clamp(24px,4vw,40px);
-  }
-  .progress-bar {
-    display: flex;
-    width: 100%;
-    min-width: 0;
-    gap: 4px;
-    height: 6px;
-    margin: 0 0 9px;
-  }
-  .progress-segment {
-    flex: 1 1 0;
-    min-width: 0;
-    border-radius: 999px;
-    background: var(--state-color);
-  }
-  .progress-legend {
-    max-width: 65ch;
-    margin: 0;
+  .state.pass { color: var(--pass); }
+  .state.working { color: var(--accent); }
+  .state.retry, .state.fail { color: var(--fail); }
+  .state.waiting { color: var(--waiting); }
+  .worker .time {
     color: var(--muted);
-    font-size: 12px;
-    line-height: 1.4;
+    font-size: 12.5px;
+    white-space: nowrap;
   }
-  .section {
-    margin: 0 0 clamp(24px,4vw,40px);
-  }
-  .section-title {
-    max-width: 65ch;
-    margin: 0 0 8px;
+  .worker .activity {
+    grid-column: 2 / -1;
+    min-width: 0;
+    overflow: hidden;
     color: var(--muted);
-    font-size: 12px;
-    font-weight: 800;
-    letter-spacing: 0;
+    font-size: 13px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
-  .updates,
-  .tasks,
+  .worker .links {
+    grid-column: 2 / -1;
+    font-size: 13px;
+  }
+  .worker .links a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .worker .links a:hover,
+  .worker .links a:focus-visible {
+    text-decoration: underline;
+  }
   .runs {
     list-style: none;
     margin: 0;
     padding: 0;
-  }
-  .updates li {
-    display: grid;
-    grid-template-columns: minmax(68px, max-content) minmax(0, 1fr);
-    gap: 12px;
-    padding: 10px 0;
-    border-top: 1px solid color-mix(in srgb, var(--muted) 20%, transparent);
-    color: var(--ink);
-    font-size: 14px;
-    line-height: 1.45;
-  }
-  .updates time {
-    color: var(--muted);
   }
   .omitted-note,
   .empty-note {
@@ -1636,54 +1729,16 @@ ARTIFACT_BASE_CSS = """
     font-size: 13px;
     line-height: 1.45;
   }
-  .task-row,
   .run-row {
     display: grid;
     gap: 16px;
     align-items: center;
     padding: 12px 0;
-    border-top: 1px solid color-mix(in srgb, var(--muted) 20%, transparent);
-  }
-  .task-row {
-    grid-template-columns: 16px minmax(0, 1.35fr) minmax(112px, .55fr) minmax(76px, .4fr) minmax(150px, .8fr);
+    border-top: 1px solid var(--hairline);
   }
   .run-row {
     grid-template-columns: minmax(0, 1.35fr) minmax(112px, .55fr) minmax(76px, .4fr) minmax(150px, .8fr);
   }
-  .task-row::before {
-    content: "";
-    width: 14px;
-    height: 14px;
-    border-radius: 999px;
-    align-self: center;
-    justify-self: center;
-  }
-  .task-row.state-pass::before {
-    content: "\\2713";
-    display: grid;
-    place-items: center;
-    background: var(--pass);
-    color: var(--ground);
-    font-size: 10px;
-    font-weight: 900;
-    line-height: 1;
-  }
-  .task-row.state-running::before {
-    background: var(--running);
-  }
-  .task-row.state-waiting::before {
-    border: 2px solid var(--waiting);
-  }
-  .task-row.state-fail::before {
-    background: var(--fail);
-  }
-  .task-main {
-    display: flex;
-    min-width: 0;
-    flex-direction: column;
-    gap: 2px;
-  }
-  .task-name,
   .run-name {
     min-width: 0;
     overflow: hidden;
@@ -1693,39 +1748,25 @@ ARTIFACT_BASE_CSS = """
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .task-activity {
-    min-width: 0;
-    overflow: hidden;
-    color: var(--muted);
-    font-size: 12px;
-    font-weight: 500;
-    line-height: 1.35;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .task-state,
   .run-state {
     color: var(--state-color);
     font-weight: 800;
   }
-  .task-duration,
   .run-duration {
     color: var(--muted);
   }
-  .task-links,
   .run-links {
     display: flex;
     min-width: 0;
     flex-wrap: wrap;
     gap: 8px 14px;
   }
-  .task-links .muted,
   .run-links .muted {
     color: var(--muted);
   }
   .state-pass { --state-color: var(--pass); }
   .state-fail { --state-color: var(--fail); }
-  .state-running { --state-color: var(--running); }
+  .state-running { --state-color: var(--accent); }
   .state-waiting { --state-color: var(--waiting); }
   .meta {
     max-width: 65ch;
@@ -1742,7 +1783,7 @@ ARTIFACT_BASE_CSS = """
   }
   .muted { color: var(--muted); }
   table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid color-mix(in srgb, var(--muted) 20%, transparent); vertical-align: top; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--hairline); vertical-align: top; }
   th { color: var(--muted); font-weight: 700; font-size: 10px; letter-spacing: 0; }
   .chip { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 10px; font-weight: 800; color: var(--ground); white-space: nowrap; }
   pre {
@@ -1750,7 +1791,7 @@ ARTIFACT_BASE_CSS = """
     max-width: 100%;
     margin: 0;
     overflow: auto;
-    border: 1px solid color-mix(in srgb, var(--muted) 20%, transparent);
+    border: 1px solid var(--hairline);
     border-radius: 6px;
     background: var(--surface);
     color: var(--ink);
@@ -1762,35 +1803,30 @@ ARTIFACT_BASE_CSS = """
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
+  footer,
   .page-foot {
-    max-width: 65ch;
-    margin-top: clamp(24px,4vw,44px);
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
     color: var(--muted);
     font-size: 12px;
     line-height: 1.5;
   }
   a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
-  @media (prefers-reduced-motion: no-preference) {
-    .progress-segment.state-running,
-    .task-row.state-running::before {
-      animation: ringer-state-pulse 1.35s ease-in-out infinite;
-    }
-    @keyframes ringer-state-pulse {
-      0%, 100% { opacity: .48; }
-      50% { opacity: 1; }
-    }
-  }
   @media (max-width: 640px) {
-    .task-row,
+    .worker,
     .run-row {
       grid-template-columns: minmax(0, 1fr);
       gap: 6px;
     }
-    .task-row::before {
+    .glyph {
       display: none;
     }
-    .task-links,
+    .worker .activity,
+    .worker .links {
+      grid-column: 1 / -1;
+    }
     .run-links {
       gap: 6px 12px;
     }
@@ -1873,18 +1909,18 @@ class ArtifactRenderer:
             current_status[task_key] = status
             if previous == status:
                 continue
-            line = plain_transition_line(task_key, previous, status, task)
-            if line:
-                self._append_transition((task_key, status), line)
+            event = plain_transition_event(task_key, previous, status, task)
+            if event:
+                self._append_transition((task_key, status), event)
         self._last_task_status = current_status
 
-    def _append_transition(self, key: tuple[str, str], line: str) -> None:
+    def _append_transition(self, key: tuple[str, str], event: str | dict[str, str]) -> None:
         if key in self._seen_transition_keys:
             return
         self._seen_transition_keys.add(key)
-        self._transition_log.append(
-            {"time": datetime.now().strftime("%H:%M:%S"), "line": line}
-        )
+        if isinstance(event, str):
+            event = {"line": event}
+        self._transition_log.append({"time": datetime.now().strftime("%H:%M:%S"), **event})
 
     def link_for_source(
         self,
@@ -1969,6 +2005,8 @@ def render_file_wrapper_html(
         else ""
     )
     title = html_escape(deliverable_title(source_path))
+    safe_run_name = html_escape(run_name)
+    safe_task_key = html_escape(task_key)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -1978,12 +2016,16 @@ def render_file_wrapper_html(
 <style>{ARTIFACT_BASE_CSS}</style>
 </head>
 <body>
-<div class="wrap">
-  <header class="page-head">
-    <p class="eyebrow" title="{html_escape(run_name)}">{html_escape(run_name)}</p>
-    <h1 class="page-title">{title}</h1>
-    <p class="meta">{html_escape(task_key)} produced this on <b>{source_mtime}</b>.{truncation_note}</p>
+<div class="page">
+  <header class="corner">
+    <span class="live-dot waiting" aria-hidden="true"></span>
+    <span class="eyebrow">Ringer &nbsp;·&nbsp; <b>{safe_run_name}</b> &nbsp;·&nbsp; {safe_task_key}</span>
+    <span class="clock mono">artifact</span>
   </header>
+  <section class="timeline" aria-label="{title}">
+    <h1 class="briefing">{title}</h1>
+    <p class="meta">{safe_task_key} produced this on <b>{source_mtime}</b>.{truncation_note}</p>
+  </section>
   <pre>{html_escape(content)}</pre>
 </div>
 </body>
@@ -2003,13 +2045,15 @@ def task_status_counts(state: dict[str, Any]) -> dict[str, int]:
     buckets = [task_state_bucket(str(task.get("status", "queued"))) for task in tasks]
     pass_n = sum(1 for bucket in buckets if bucket == "pass")
     fail_n = sum(1 for bucket in buckets if bucket == "fail")
-    running_n = sum(1 for bucket in buckets if bucket == "running")
+    running_n = sum(1 for bucket in buckets if bucket == "working")
+    retry_n = sum(1 for bucket in buckets if bucket == "retry")
     waiting_n = sum(1 for bucket in buckets if bucket == "waiting")
     return {
         "total": len(tasks),
         "pass": pass_n,
         "fail": fail_n,
         "running": running_n,
+        "retry": retry_n,
         "waiting": waiting_n,
     }
 
@@ -2020,8 +2064,8 @@ def task_word(count: int) -> str:
 
 def passed_phrase(count: int) -> str:
     if count == 1:
-        return "1 finished cleanly"
-    return f"{count} finished cleanly"
+        return "1 finished and checked"
+    return f"{count} finished and checked"
 
 
 def failed_phrase(count: int) -> str:
@@ -2032,8 +2076,14 @@ def failed_phrase(count: int) -> str:
 
 def running_phrase(count: int) -> str:
     if count == 1:
-        return "1 is running"
-    return f"{count} are running"
+        return "1 working"
+    return f"{count} working"
+
+
+def retry_phrase(count: int) -> str:
+    if count == 1:
+        return "1 sent back"
+    return f"{count} sent back"
 
 
 def waiting_phrase(count: int) -> str:
@@ -2043,26 +2093,38 @@ def waiting_phrase(count: int) -> str:
 
 
 def live_briefing_sentence(state: dict[str, Any]) -> str:
+    return html_to_text(live_briefing_html(state))
+
+
+def live_briefing_html(state: dict[str, Any]) -> str:
     counts = task_status_counts(state)
     elapsed = fmt_plain_ago(state.get("elapsed_s"))
     total = counts["total"]
     if total == 0:
-        return f"Ringer has no tasks. Started {elapsed} ago."
-    status_sentence = ", ".join(
-        [
-            passed_phrase(counts["pass"]),
-            failed_phrase(counts["fail"]),
-            running_phrase(counts["running"]),
-            waiting_phrase(counts["waiting"]),
-        ]
-    )
+        return f"Ringer has no tasks. Started {html_escape(elapsed)} ago."
+    parts = []
+    if counts["pass"]:
+        parts.append(f'<span class="n-pass">{html_escape(passed_phrase(counts["pass"]))}</span>')
+    if counts["running"]:
+        parts.append(html_escape(running_phrase(counts["running"])))
+    if counts["retry"]:
+        parts.append(f'<span class="n-fail">{html_escape(retry_phrase(counts["retry"]))}</span>')
+    if counts["waiting"]:
+        parts.append(html_escape(waiting_phrase(counts["waiting"])))
+    if counts["fail"]:
+        parts.append(f'<span class="n-fail">{html_escape(failed_phrase(counts["fail"]))}</span>')
+    status_sentence = join_plain_html_parts(parts)
     return (
-        f"Ringer is working on {total} {task_word(total)}. "
-        f"{status_sentence}, started {elapsed} ago."
+        f"Ringer is working on {total} {task_word(total)} — "
+        f"{status_sentence}, started {html_escape(elapsed)} ago."
     )
 
 
 def final_briefing_sentence(state: dict[str, Any]) -> str:
+    return html_to_text(final_briefing_html(state))
+
+
+def final_briefing_html(state: dict[str, Any]) -> str:
     counts = task_status_counts(state)
     total = counts["total"]
     pass_n = counts["pass"]
@@ -2070,8 +2132,25 @@ def final_briefing_sentence(state: dict[str, Any]) -> str:
     elapsed = fmt_compact_duration(state.get("elapsed_s"))
     first = f"Ringer finished {total} {task_word(total)} in {elapsed}."
     if fail_n == 0:
-        return f"{first} All {total} finished cleanly."
-    return f"{first} {pass_n} passed, {fail_n} failed even after a retry."
+        return f"{html_escape(first)} <span class=\"n-pass\">All {total} finished and checked.</span>"
+    return (
+        f"{html_escape(first)} <span class=\"n-pass\">{pass_n} finished and checked</span>, "
+        f"<span class=\"n-fail\">{fail_n} failed after retry.</span>"
+    )
+
+
+def join_plain_html_parts(parts: list[str]) -> str:
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return parts[0]
+    if len(parts) == 2:
+        return f"{parts[0]} and {parts[1]}"
+    return ", ".join(parts[:-1]) + f", and {parts[-1]}"
+
+
+def html_to_text(value: str) -> str:
+    return re.sub(r"<[^>]+>", "", value)
 
 
 def plain_transition_line(
@@ -2080,34 +2159,46 @@ def plain_transition_line(
     status: str,
     task: dict[str, Any],
 ) -> str | None:
+    event = plain_transition_event(task_key, previous_status, status, task)
+    if not event:
+        return None
+    return event["line"]
+
+
+def plain_transition_event(
+    task_key: str,
+    previous_status: str | None,
+    status: str,
+    task: dict[str, Any],
+) -> dict[str, str] | None:
     attempts = int(task.get("attempts") or 0)
     timed_out = bool(task.get("check_timed_out")) or status == "timeout"
     check_excerpt = first_check_output_line(task)
     if status == "running" and previous_status in {None, "queued"}:
-        return f"{task_key} started"
+        return {"line": f"{task_key} started"}
     if status == "retrying":
         if timed_out:
-            return f"{task_key} timed out — trying again"
+            return {"line": f"{task_key} timed out — trying again"}
         if check_excerpt:
-            return (
-                f'{task_key} did not pass its check — sending it back. '
-                f'The check reported: "{check_excerpt}"'
-            )
-        return f"{task_key} did not finish cleanly — trying again"
+            return {
+                "line": f"{task_key} didn't finish cleanly — sent back to redo the work.",
+                "catch": check_excerpt,
+            }
+        return {"line": f"{task_key} did not finish cleanly — trying again"}
     if status == "pass":
         if attempts > 1:
-            return f"{task_key} passed on the second try, {fmt_compact_duration(task.get('elapsed_s'))}"
-        return f"{task_key} finished and checked, {fmt_compact_duration(task.get('elapsed_s'))}"
+            return {"line": f"{task_key} passed on the second try, {fmt_compact_duration(task.get('elapsed_s'))}"}
+        return {"line": f"{task_key} finished and checked, {fmt_compact_duration(task.get('elapsed_s'))}"}
     if status == "fail":
         if timed_out:
-            return f"{task_key} timed out"
+            return {"line": f"{task_key} timed out"}
         if check_excerpt:
-            return f'{task_key} could not finish — its check reported: "{check_excerpt}"'
+            return {"line": f"{task_key} could not finish.", "catch": check_excerpt}
         if attempts > 1:
-            return f"{task_key} failed after the second try"
-        return f"{task_key} failed"
+            return {"line": f"{task_key} failed after the second try"}
+        return {"line": f"{task_key} failed"}
     if status == "timeout":
-        return f"{task_key} timed out"
+        return {"line": f"{task_key} timed out"}
     return None
 
 
@@ -2126,17 +2217,21 @@ def task_state_bucket(status: str) -> str:
         return "pass"
     if status in {"fail", "error", "timeout", "died"}:
         return "fail"
-    if status in {"running", "verifying", "retrying"}:
-        return "running"
+    if status == "retrying":
+        return "retry"
+    if status in {"running", "verifying"}:
+        return "working"
     return "waiting"
 
 
 def task_state_word(status: str) -> str:
     bucket = task_state_bucket(status)
     if bucket == "pass":
-        return "finished and checked"
-    if bucket == "running":
+        return "finished & checked"
+    if bucket == "working":
         return "working"
+    if bucket == "retry":
+        return "sent back — redoing"
     if bucket == "fail":
         return "failed"
     return "waiting"
@@ -2152,24 +2247,29 @@ def render_progress_bar(tasks: list[dict[str, Any]], counts: dict[str, int]) -> 
         key = html_escape(str(task.get("key", "task")))
         bucket = task_state_bucket(str(task.get("status", "queued")))
         state_word = html_escape(task_state_word(str(task.get("status", "queued"))))
+        css_class = "" if bucket == "waiting" else f' class="{bucket}"'
         segments.append(
-            f'<span class="progress-segment state-{bucket}" aria-label="{key}: {state_word}"></span>'
+            f'<span{css_class} aria-label="{key}: {state_word}"></span>'
         )
     bar = "".join(segments) if segments else ""
     legend_parts = []
     if counts["pass"]:
         legend_parts.append(f'{counts["pass"]} finished')
     if counts["running"]:
-        legend_parts.append(f'{counts["running"]} running')
-    if counts["waiting"]:
-        legend_parts.append(f'{counts["waiting"]} waiting')
+        legend_parts.append(f'{counts["running"]} working')
+    if counts["retry"]:
+        legend_parts.append(f'{counts["retry"]} sent back')
     if counts["fail"]:
         legend_parts.append(f'{counts["fail"]} failed')
-    legend = " &middot; ".join(legend_parts) if legend_parts else "No tasks"
-    return f"""<div class="progress-wrap" aria-label="Task progress">
-    <div class="progress-bar">{bar}</div>
-    <p class="progress-legend">{legend}</p>
-  </div>"""
+    if counts["waiting"]:
+        legend_parts.append(f'{counts["waiting"]} waiting')
+    legend = " · ".join(legend_parts) if legend_parts else "No tasks"
+    aria = (
+        f'{counts["total"]} tasks: {counts["pass"]} passed, {counts["running"]} working, '
+        f'{counts["retry"]} retrying, {counts["waiting"]} waiting, {counts["fail"]} failed'
+    )
+    return f"""<div class="rounds" role="img" aria-label="{html_escape(aria)}">{bar}</div>
+    <p class="legend">{html_escape(legend)}</p>"""
 
 
 def render_status_updates(updates: list[dict[str, str]], *, omitted: int = 0) -> str:
@@ -2179,9 +2279,37 @@ def render_status_updates(updates: list[dict[str, str]], *, omitted: int = 0) ->
     for update in updates:
         stamp = html_escape(str(update.get("time", "")))
         line = html_escape(str(update.get("line", "")))
-        items.append(f'<li><time class="mono">{stamp}</time><span>{line}</span></li>')
+        catch = str(update.get("catch", "")).strip()
+        catch_html = (
+            f'<p class="catch"><b>Caught:</b> {html_escape(catch)}</p>'
+            if catch
+            else ""
+        )
+        items.append(f'<div class="tl-row"><time class="mono">{stamp}</time><div>{line}{catch_html}</div></div>')
     note = '<p class="omitted-note">earlier updates omitted</p>' if omitted else ""
-    return '<ol class="updates">' + "".join(items) + "</ol>" + note
+    return "".join(items) + note
+
+
+def render_corner_header(state: dict[str, Any], *, live: bool) -> str:
+    run_name = html_escape(str(state.get("run_name", "ringer")))
+    identity = html_escape(str(state.get("identity", "unknown")))
+    elapsed = html_escape(fmt_compact_duration(state.get("elapsed_s")))
+    dot_class = "live-dot is-live" if live else f"live-dot {final_dot_bucket(state)}"
+    clock_label = f"{elapsed} elapsed" if live else f"{elapsed} total"
+    return f"""<header class="corner">
+    <span class="{dot_class}" aria-hidden="true"></span>
+    <span class="eyebrow">Ringer &nbsp;·&nbsp; <b>{run_name}</b> &nbsp;·&nbsp; {identity}</span>
+    <span class="clock mono">{clock_label}</span>
+  </header>"""
+
+
+def final_dot_bucket(state: dict[str, Any]) -> str:
+    counts = task_status_counts(state)
+    if counts["fail"]:
+        return "fail"
+    if counts["pass"]:
+        return "pass"
+    return "waiting"
 
 
 def render_status_html(
@@ -2194,7 +2322,7 @@ def render_status_html(
     run_name = html_escape(str(state.get("run_name", "ringer")))
     tasks = state_tasks(state)
     counts = task_status_counts(state)
-    briefing = html_escape(live_briefing_sentence(state))
+    briefing = live_briefing_html(state)
     updates = renderer.transition_feed(state, limit=50) if renderer else []
     omitted = renderer.omitted_transition_count(50) if renderer else 0
     return f"""<!doctype html>
@@ -2207,18 +2335,20 @@ def render_status_html(
 <style>{ARTIFACT_BASE_CSS}</style>
 </head>
 <body>
-<div class="wrap">
-  <header class="page-head">
-    <p class="eyebrow" title="{run_name}">{run_name}</p>
-    <p id="right-now-heading" class="briefing">{briefing}</p>
-  </header>
+<div class="page">
+  {render_corner_header(state, live=True)}
+  <h1 id="right-now-heading" class="briefing">{briefing}</h1>
   {render_progress_bar(tasks, counts)}
-  <section class="section" aria-labelledby="status-updates-heading">
-    <h2 class="section-title" id="status-updates-heading">Status updates</h2>
+  <section class="timeline" aria-labelledby="status-updates-heading">
+    <h2 id="status-updates-heading">What's happening</h2>
     {render_status_updates(updates, omitted=omitted)}
   </section>
   {render_task_strip(tasks, state=state, renderer=renderer, force_wrappers=force_wrappers)}
-  <footer class="page-foot mono">Updated {html_escape(local_time_label())} &mdash; this page refreshes itself</footer>
+  <footer>
+    <span class="mono">Updated {html_escape(local_time_label())}</span>
+    <span>·</span>
+    <span>This page updates itself while the work runs.</span>
+  </footer>
 </div>
 </body>
 </html>
@@ -2235,7 +2365,7 @@ def render_final_report_html(
     run_name = html_escape(str(state.get("run_name", "ringer")))
     tasks = state_tasks(state)
     counts = task_status_counts(state)
-    briefing = html_escape(final_briefing_sentence(state))
+    briefing = final_briefing_html(state)
     updates = renderer.transition_feed(state, limit=50) if renderer else []
     omitted = renderer.omitted_transition_count(50) if renderer else 0
 
@@ -2248,18 +2378,18 @@ def render_final_report_html(
 <style>{ARTIFACT_BASE_CSS}</style>
 </head>
 <body>
-<div class="wrap">
-  <header class="page-head">
-    <p class="eyebrow" title="{run_name}">{run_name}</p>
-    <p id="what-happened-heading" class="briefing">{briefing}</p>
-  </header>
+<div class="page">
+  {render_corner_header(state, live=False)}
+  <h1 id="what-happened-heading" class="briefing">What happened — {briefing}</h1>
   {render_progress_bar(tasks, counts)}
-  <section class="section" aria-labelledby="status-updates-heading">
-    <h2 class="section-title" id="status-updates-heading">Status updates</h2>
+  <section class="timeline" aria-labelledby="status-updates-heading">
+    <h2 id="status-updates-heading">What's happening</h2>
     {render_status_updates(updates, omitted=omitted)}
   </section>
   {render_task_strip(tasks, state=state, renderer=renderer, force_wrappers=force_wrappers)}
-  <footer class="page-foot mono">Finished {html_escape(local_time_label())}</footer>
+  <footer>
+    <span class="mono">Finished {html_escape(local_time_label())}</span>
+  </footer>
 </div>
 </body>
 </html>
@@ -2278,10 +2408,10 @@ def render_task_strip(
         for task in tasks
     )
     if not rows:
-        rows = '<li class="empty-note">No tasks.</li>'
-    return f"""<section class="section" aria-labelledby="tasks-heading">
-    <h2 class="section-title" id="tasks-heading">Tasks</h2>
-    <ol class="tasks">{rows}</ol>
+        rows = '<p class="empty-note">No tasks.</p>'
+    return f"""<section class="workers" aria-labelledby="tasks-heading">
+    <h2 id="tasks-heading">The workers</h2>
+    {rows}
   </section>"""
 
 
@@ -2295,11 +2425,12 @@ def render_task_item(
     status = str(task.get("status", "queued"))
     key = html_escape(str(task.get("key", "")))
     bucket = task_state_bucket(status)
+    css_bucket = "working" if bucket == "working" else bucket
     state_word = html_escape(task_state_word(status))
     elapsed = html_escape(fmt_compact_duration(task.get("elapsed_s")))
     activity = task_activity_line(task, bucket)
     activity_html = (
-        f'<span class="task-activity" title="{html_escape(activity)}">{html_escape(activity)}</span>'
+        f'<span class="activity" title="{html_escape(activity)}">{html_escape(activity)}</span>'
         if activity
         else ""
     )
@@ -2310,16 +2441,18 @@ def render_task_item(
         force_wrappers=force_wrappers,
     )
 
-    return f"""<li class="task-row state-{bucket}">
-      <span class="task-main"><span class="task-name" title="{key}">{key}</span>{activity_html}</span>
-      <span class="task-state">{state_word}</span>
-      <span class="task-duration mono">{elapsed}</span>
-      <span class="task-links">{links_html}</span>
-    </li>"""
+    return f"""<div class="worker">
+      <span class="glyph {css_bucket}" aria-hidden="true"></span>
+      <span class="name" title="{key}">{key}</span>
+      <span class="state {css_bucket}">{state_word}</span>
+      <span class="time mono">{elapsed}</span>
+      {activity_html}
+      <span class="links">{links_html}</span>
+    </div>"""
 
 
 def task_activity_line(task: dict[str, Any], bucket: str) -> str:
-    if bucket != "running":
+    if bucket not in {"working", "retry"}:
         return ""
     activity = task.get("activity") or task.get("last_action") or task.get("last-action") or ""
     return str(activity).strip()
@@ -2359,7 +2492,7 @@ def render_task_links(
                 if renderer
                 else file_href(report_file)
             )
-            links.append(f'<a href="{html_escape(href)}">read what this worker produced</a>')
+            links.append(f'<a href="{html_escape(href)}">Read what it found</a>')
             break
 
     log_path = task.get("log_path")

@@ -470,6 +470,7 @@
       artifactManual: Boolean(sessionStorage.getItem(ARTIFACT_KEY)),
       artifactVersion: "live",
       frameKey: "",
+      frameContent: "",
       frameRequest: 0
     };
 
@@ -987,8 +988,11 @@
         state.artifactManual = false;
         sessionStorage.removeItem(ARTIFACT_KEY);
       }
+      // Only choose FOR the user when nothing is on screen yet. A new live
+      // run must never steal the view mid-review (demo-night lesson).
+      if (current) return;
       const target = newestArtifact();
-      if (target && state.artifactName !== target.name) {
+      if (target) {
         state.artifactName = target.name;
         state.artifactVersion = "live";
       }
@@ -1118,23 +1122,32 @@
         showArtifactMessage(state.artifacts.length ? "Artifact path unavailable." : "No artifacts yet.");
         return;
       }
-      if (!force && state.frameKey === target.key) return;
+      const isLive = target.artifact.state === "live" && !target.version;
+      if (!force && state.frameKey === target.key && !isLive) return;
       const request = ++state.frameRequest;
       try {
         const response = await fetch(target.src, {cache: "no-store"});
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const raw = await response.text();
         if (request !== state.frameRequest) return;
-        const frame = document.createElement("iframe");
-        frame.title = `Artifact: ${target.artifact.name}`;
-        frame.src = target.src;
-        frame.addEventListener("error", () => {
-          if (state.frameKey === target.key) showArtifactMessage("Could not load this artifact.");
-        });
-        els.frameWrap.replaceChildren(frame);
+        // The live page carries a meta refresh for standalone viewing; inside
+        // this pane WE are the refresher — strip it and swap content only on
+        // change, so nothing ever flashes.
+        const html = raw.replace(/<meta[^>]+http-equiv=["']?refresh["']?[^>]*>/gi, "");
+        if (state.frameKey === target.key && state.frameContent === html) return;
+        let frame = els.frameWrap.querySelector("iframe");
+        if (!frame || state.frameKey !== target.key) {
+          frame = document.createElement("iframe");
+          frame.title = `Artifact: ${target.artifact.name}`;
+          els.frameWrap.replaceChildren(frame);
+        }
+        frame.srcdoc = html;
         state.frameKey = target.key;
+        state.frameContent = html;
       } catch (_error) {
         if (request !== state.frameRequest) return;
         state.frameKey = "";
+        state.frameContent = "";
         showArtifactMessage("Could not load this artifact.");
       }
     }
@@ -1166,6 +1179,7 @@
       }
       renderTop();
       renderArtifacts();
+      if (state.tab === "artifacts") loadArtifactFrame(false);
     }
 
     els.tabLive.addEventListener("click", () => setTab("live"));

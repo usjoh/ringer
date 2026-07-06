@@ -62,6 +62,21 @@ Lint catches unverifiable checks, silent checks, worktree deliverable/commit
 loss, serial fan-out, write collisions, and underspecified specs; `run`
 prints the same findings as non-blocking warnings.
 
+## One job, one artifact
+
+A job the human asked for — however many rounds it takes — is ONE artifact.
+Use the SAME `run_name` for every round (`sd-crate-launch`, not
+`sd-crate-r1` / `sd-crate-r2`): the library accumulates each round as a
+version under one entry, and the human watches one page evolve instead of
+hunting across three "live" tabs. Name it after the JOB in the human's
+words, not after your batch structure.
+
+And the artifact page is where results are REVIEWED. When a round finishes,
+read the deliverables from the artifact store and direct the human to the
+page — never `cat` result files into the terminal as the reveal. If a result
+matters, it belongs in the artifact; if it isn't there, that's a harvest gap
+to fix (declare it in `expect_files`), not a reason to bypass the page.
+
 ## Spec-writing craft
 
 Workers are stateless and cannot ask questions. Every spec must be
@@ -101,6 +116,14 @@ the check's failure output.
 - **Never `true`, `exit 0`, or `echo done`.** A check that cannot fail is a
   task that cannot be verified — that's just trusting the worker with extra
   steps.
+- **Strict on substance, tolerant on format.** Checks that count exact
+  headings, demand exact casing, or grep rigid phrasings fail honest work
+  over formatting — and a wall of red format-failures reads as a broken
+  system, not a careful one (demo-night lesson). Verify what must be TRUE
+  (the file proves X, the code runs, the quote exists in the source), use
+  case-insensitive and flexible matching for structure, and reserve hard
+  failure for substance: missing evidence, fabricated content, code that
+  doesn't run.
 
 ## Pattern playbook
 

@@ -3165,6 +3165,10 @@ class PersistentHudServer:
                     )
                     return
                 if path == "/api/library":
+                    # A run that died without cleanup must not sit "live"
+                    # forever in the rail — reconcile against real pids on read.
+                    with contextlib.suppress(Exception):
+                        reconcile_artifact_library_dead_runs(state_dir)
                     send_json_response(
                         self,
                         read_json_object(artifact_library_path(state_dir), {"artifacts": {}}),

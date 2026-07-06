@@ -300,8 +300,10 @@ class LintManifestTests(unittest.TestCase):
         self.assertEqual([], lint_manifest(manifest), "compliant manifest should have no lint findings")
 
     def test_templates_are_clean(self) -> None:
-        template_paths = sorted((ROOT / "templates").glob("*.json"))
-        self.assertTrue(template_paths, "expected templates/*.json files to exist")
+        # Every kit ships one or more manifest skeletons (manifest.json plus
+        # optional manifest-round*.json for multi-round kits).
+        template_paths = sorted((ROOT / "templates").glob("*/manifest*.json"))
+        self.assertTrue(template_paths, "expected templates/*/manifest*.json files to exist")
         for path in template_paths:
             with self.subTest(template=path.name):
                 manifest = Manifest.from_path(path)

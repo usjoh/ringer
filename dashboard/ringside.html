@@ -701,7 +701,7 @@
 
       const selectedName = state.artifactName;
       const visibleRuns = selectedName ? state.runs.filter(run => run.run_name === selectedName) : state.runs;
-      const roundOrder = [...visibleRuns].sort((a, b) => (a.startedTs || 0) - (b.startedTs || 0));
+      const roundOrder = [...visibleRuns].sort((a, b) => parseTime(a.started_at) - parseTime(b.started_at));
       const roundOf = run => roundOrder.indexOf(run) + 1;
       if (!visibleRuns.length) {
         const note = document.createElement("p");
@@ -1241,7 +1241,7 @@
     function renderMachineStrip() {
       const strip = document.getElementById("machine-strip");
       if (!strip) return;
-      const runs = [...state.runs].sort((a, b) => (a.startedTs || 0) - (b.startedTs || 0)).slice(-10);
+      const runs = [...state.runs].sort((a, b) => parseTime(a.started_at) - parseTime(b.started_at)).slice(-10);
       const frag = document.createDocumentFragment();
       runs.forEach(run => {
         const seg = document.createElement("button");

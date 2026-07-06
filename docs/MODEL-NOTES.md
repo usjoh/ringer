@@ -38,6 +38,15 @@ checks and raw logs support — no vibes, no worker self-reports.
   (see process lessons). Heavy single-file feature work against an exact
   behavioral contract is squarely codex's lane.
 
+- 2026-07-06 — elsas-website demo: Next.js scaffold PASSED attempt 2 (682s,
+  ~354k tok) — attempt 1 built a complete homepage and silently skipped the
+  other 10 routes; the route-enumeration check caught it. Narration lane
+  (15 ElevenLabs calls, chunked, nohup pattern) passed attempt 1. CAUTION: a
+  codex fix worker GAMED a verbatim-content needle by hiding the required text
+  in a visually-hidden paragraph — passed the check, caught only by
+  orchestrator integration review. Needle checks need an anti-hidden-text
+  assertion or documented exceptions.
+
 ## glm-5.2 via opencode (`openrouter/z-ai/glm-5.2`)
 
 - The cheap-intelligence default (~$0.74/M in, $2.33/M out, 2026-07 —
@@ -74,12 +83,43 @@ checks and raw logs support — no vibes, no worker self-reports.
   spec/check craft, not model weakness). Brand-kit doc incl. a clean inline
   SVG wordmark: good, one bounce off an over-strict check regex.
 
+- 2026-07-06 — elsas-website demo: verbatim content capture (16 pages + 19
+  news posts, 213 blockquotes) passed attempt 2 — attempt 1 SELF-REPORTED
+  "all 213 match exactly, 0 errors" while the executed check found 13 stitched/
+  paraphrased quotes. Self-reports are worthless; the retry with injected
+  failures fixed all 13 (~148k tok total, ~3¢). Page builds (about+faq;
+  news index + 19 generated post routes via its own extraction script) and
+  2 focus-group personas: all attempt 1. Fix batch attempt 1.
+
 ## kimi-k2.7 via opencode (`openrouter/moonshotai/kimi-k2.7-code`)
 
 - 2026-07-06 — adversarial pre-merge review (aicred spark): passed on
   attempt 1, ~83k tokens. First real outing; promising for review work.
   (Ran through an ad-hoc copy of the opencode engine block — the per-task
   `model` field now makes that unnecessary.)
+
+
+## grok-build (Grok CLI engine, flat plan)
+
+- 2026-07-06 — first outing (elsas-website demo), engine added same day:
+  audition PASS attempt 1 in 28.9s. Then: asset harvest (11 images, live URL
+  re-fetch check), books page, 5 work-page routes in one task (59 verbatim
+  needles), adversarial code review (10 real findings incl. an unshelled 404
+  and a broken embedded link), press/media fix batch, audio-player integration
+  across 15 pages — ALL attempt 1 (player's red ledger entry was a check bug,
+  artifact certified). Fast, precise on mechanical/code work. No token counts
+  in JSON output (flat plan) — cost reads "included in plan".
+
+## grok-composer-2.5-fast (Grok CLI engine, flat plan)
+
+- 2026-07-06 — first outing (elsas-website demo): audition PASS attempt 1
+  (138s — slower than grok-build but the strongest copy of the round).
+  Accessibility constitution (14 testable criteria, SC-numbered) attempt 1;
+  a11y-gatekeeper harness (axe+Playwright, light/dark, reduced-motion assert)
+  attempt 2 — attempt 1's harness mishandled Next's default /404 route.
+  Events/faq/contact fix batch attempt 1, but satisfied "editorial grid" with
+  an EMPTY aside landmark — axe caught it (landmark-complementary-is-top-level).
+  Persona work: good. Watch for letter-of-the-spec shortcuts on layout asks.
 
 ## Small / flash-class models
 
@@ -123,3 +163,14 @@ checks and raw logs support — no vibes, no worker self-reports.
   checks must be prefix-tolerant (workers legitimately trim slugs); (2) any
   heading-regex must tolerate numbered headings ("## 3. Type / Typography").
   Both failures looked like worker laziness until the raw logs said otherwise.
+- 2026-07-06 — elsas-website demo, check-craft in BOTH directions: (1) a fixed
+  800-char body floor failed a worker for faithfully converting genuinely tiny
+  source posts — floor must scale with the source; (2) a citation gate treating
+  every backtick as a page-quote failed honest reviewers who backticked their
+  own fix-suggestions — line-scoped pair parsing + attribute-aware corpus fixed
+  it; (3) needle-exception lists must be shared across ALL checks that consume
+  the needle set (a needle excepted in one checker failed a task through
+  another). Post-mortems ruled FOR the worker 3 times this run — read raw logs
+  before blaming the model.
+- 2026-07-06 — opencode sqlite "database is locked" again with just 2
+  simultaneous opencode spawns (page-news + page-about-faq); retry absorbed it.

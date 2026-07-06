@@ -4206,6 +4206,28 @@ def median_int(values: list[int]) -> int | None:
     return (ordered[middle - 1] + ordered[middle]) // 2
 
 
+def model_log_task_base_key(row: dict[str, Any]) -> tuple[str, str, str, str] | None:
+    run_id = model_log_text(row.get("run_id"))
+    task_key = model_log_text(row.get("task_key"))
+    if not run_id or not task_key:
+        return None
+    return (run_id, task_key, model_log_row_model(row), model_log_row_task_type(row))
+
+
+def group_model_log_tasks(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    grouped: list[list[dict[str, Any]]] = []
+    active_by_key: dict[tuple[str, str, str, str], int] = {}
+    for row in rows:
+        key = model_log_task_base_key(row)
+        if key is not None and model_log_row_is_retry(row) and key in active_by_key:
+            grouped[active_by_key[key]].append(row)
+            continue
+        grouped.append([row])
+        if key is not None:
+            active_by_key[key] = len(grouped) - 1
+    return grouped
+
+
 def read_model_log_rows(
     path: Path,
     *,
@@ -4232,13 +4254,8 @@ def read_model_log_rows(
                 continue
             rows.append(row)
     if since is not None:
-        task_rows_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
-        for row in rows:
-            run_id = model_log_text(row.get("run_id"))
-            task_key = model_log_text(row.get("task_key"))
-            task_rows_by_key.setdefault((run_id, task_key), []).append(row)
-        selected_keys: set[tuple[str, str]] = set()
-        for key, task_rows in task_rows_by_key.items():
+        selected_row_ids: set[int] = set()
+        for task_rows in group_model_log_tasks(rows):
             ordered = sorted(
                 task_rows,
                 key=lambda row: (
@@ -4248,12 +4265,8 @@ def read_model_log_rows(
             )
             final_date = parse_log_date(ordered[-1].get("logged_at"))
             if final_date and final_date >= since:
-                selected_keys.add(key)
-        rows = [
-            row
-            for row in rows
-            if (model_log_text(row.get("run_id")), model_log_text(row.get("task_key"))) in selected_keys
-        ]
+                selected_row_ids.update(id(row) for row in task_rows)
+        rows = [row for row in rows if id(row) in selected_row_ids]
     return rows, skipped
 
 
@@ -4263,14 +4276,8 @@ def aggregate_model_log_rows(
     task_type: str | None = None,
     model: str | None = None,
 ) -> list[dict[str, Any]]:
-    tasks: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for row in rows:
-        run_id = model_log_text(row.get("run_id"))
-        task_key = model_log_text(row.get("task_key"))
-        tasks.setdefault((run_id, task_key), []).append(row)
-
     groups: dict[tuple[str, str], dict[str, Any]] = {}
-    for task_rows in tasks.values():
+    for task_rows in group_model_log_tasks(rows):
         ordered = sorted(
             task_rows,
             key=lambda row: (
@@ -4360,6 +4367,647 @@ def aggregate_model_log_rows(
     )
 
 
+MODEL_SCOREBOARD_RUN_NAME = "model-scoreboard"
+MODEL_SCOREBOARD_IDENTITY = "ringer-models"
+
+
+def default_model_notes_path() -> Path:
+    return Path(__file__).resolve().parent / "docs" / "MODEL-NOTES.md"
+
+
+def normalize_notes_match_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip().lower()
+
+
+def parse_model_notes_sections(path: Path) -> dict[str, list[str]]:
+    """Return dated bullet blocks keyed by the raw level-2 heading text."""
+    try:
+        lines = path.expanduser().read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return {}
+    sections: dict[str, list[str]] = {}
+    current_heading: str | None = None
+    current_bullets: list[str] = []
+    active_bullet: list[str] | None = None
+
+    def flush_bullet() -> None:
+        nonlocal active_bullet
+        if active_bullet is not None:
+            text = "\n".join(active_bullet).strip()
+            if re.search(r"\b\d{4}-\d{2}-\d{2}\b", text):
+                current_bullets.append(text)
+            active_bullet = None
+
+    def flush_section() -> None:
+        flush_bullet()
+        if current_heading is not None:
+            sections[current_heading] = list(current_bullets)
+
+    for line in lines:
+        heading_match = re.match(r"^##\s+(.+?)\s*$", line)
+        if heading_match:
+            flush_section()
+            current_heading = heading_match.group(1).strip()
+            current_bullets = []
+            active_bullet = None
+            continue
+        if current_heading is None:
+            continue
+        if line.startswith("## "):
+            flush_section()
+            current_heading = None
+            current_bullets = []
+            active_bullet = None
+            continue
+        if line.startswith("- "):
+            flush_bullet()
+            active_bullet = [line[2:].strip()]
+            continue
+        if active_bullet is not None and (line.startswith("  ") or not line.strip()):
+            active_bullet.append(line.strip())
+            continue
+        flush_bullet()
+    flush_section()
+    return sections
+
+
+def model_judgment_notes(model_id: str, notes_sections: dict[str, list[str]]) -> list[str]:
+    needle = normalize_notes_match_text(model_id)
+    if not needle:
+        return []
+    for heading, bullets in notes_sections.items():
+        if needle in normalize_notes_match_text(heading):
+            return bullets
+    return []
+
+
+def render_notes_list(items: list[str]) -> str:
+    if not items:
+        return '<p class="empty-note">no judgment notes yet</p>'
+    rendered = []
+    for item in items:
+        text = "<br>".join(html_escape(line) for line in item.splitlines() if line.strip())
+        rendered.append(f"<li>{text}</li>")
+    return f'<ul class="notes-list">{"".join(rendered)}</ul>'
+
+
+def normalize_catalog_for_scoreboard(model: dict[str, Any]) -> dict[str, Any]:
+    if "prompt_per_m" in model and "completion_per_m" in model:
+        return model
+    if isinstance(model.get("pricing"), dict):
+        return normalize_catalog_model(model, fetched_at=str(model.get("fetched_at") or ""))
+    return model
+
+
+def catalog_models_by_id(catalog_models: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    by_id: dict[str, dict[str, Any]] = {}
+    for model in catalog_models:
+        model_id = str(model.get("id") or "").strip()
+        if model_id:
+            by_id[model_id] = normalize_catalog_for_scoreboard(model)
+    return by_id
+
+
+def model_scoreboard_tier(tasks: int) -> str:
+    if tasks >= 3:
+        return "proven"
+    if tasks > 0:
+        return "probation"
+    return "untested-with-rows"
+
+
+def model_scoreboard_tier_rank(tier: str) -> int:
+    return {"proven": 0, "probation": 1, "untested-with-rows": 2}.get(tier, 3)
+
+
+def aggregate_model_scoreboard_rows(
+    rows: list[dict[str, Any]],
+    *,
+    task_type: str | None = None,
+    model: str | None = None,
+) -> list[dict[str, Any]]:
+    models: dict[str, dict[str, Any]] = {}
+    for task_rows in group_model_log_tasks(rows):
+        ordered = sorted(
+            task_rows,
+            key=lambda row: (
+                model_log_text(row.get("logged_at")),
+                1 if model_log_row_is_retry(row) else 0,
+            ),
+        )
+        first = ordered[0]
+        final = ordered[-1]
+        group_model = model_log_row_model(final)
+        group_task_type = model_log_row_task_type(final)
+        if model is not None and group_model != model:
+            continue
+        if task_type is not None and group_task_type != task_type:
+            continue
+        model_entry = models.setdefault(
+            group_model,
+            {
+                "model": group_model,
+                "tasks": 0,
+                "attempts": 0,
+                "passed": 0,
+                "failed": 0,
+                "retries": 0,
+                "first_try_passed": 0,
+                "last_seen": "",
+                "_duration_ms": [],
+                "_tokens": [],
+                "_task_types": {},
+            },
+        )
+        breakdown = model_entry["_task_types"].setdefault(
+            group_task_type,
+            {
+                "task_type": group_task_type,
+                "tasks": 0,
+                "attempts": 0,
+                "passed": 0,
+                "failed": 0,
+                "first_try_passed": 0,
+                "last_seen": "",
+            },
+        )
+        passed = model_log_text(final.get("verdict")).upper() == "PASS"
+        first_passed = model_log_text(first.get("verdict")).upper() == "PASS"
+        for target in (model_entry, breakdown):
+            target["tasks"] += 1
+            target["attempts"] += len(ordered)
+            target["passed"] += 1 if passed else 0
+            target["failed"] += 0 if passed else 1
+            target["first_try_passed"] += 1 if first_passed else 0
+            logged_at = model_log_text(final.get("logged_at"))
+            if logged_at > target["last_seen"]:
+                target["last_seen"] = logged_at
+        model_entry["retries"] += max(0, len(ordered) - 1)
+        duration_ms = model_log_int(final.get("duration_ms"))
+        if duration_ms is not None:
+            model_entry["_duration_ms"].append(duration_ms)
+        for row in ordered:
+            tokens = model_log_int(row.get("worker_tokens"))
+            if tokens is not None:
+                model_entry["_tokens"].append(tokens)
+
+    finalized: list[dict[str, Any]] = []
+    for entry in models.values():
+        tasks_count = int(entry["tasks"])
+        breakdown_rows = []
+        for breakdown in entry["_task_types"].values():
+            b_tasks = int(breakdown["tasks"])
+            breakdown_rows.append(
+                {
+                    "task_type": breakdown["task_type"],
+                    "tasks": b_tasks,
+                    "attempts": breakdown["attempts"],
+                    "passed": breakdown["passed"],
+                    "failed": breakdown["failed"],
+                    "first_try_pass_rate": breakdown["first_try_passed"] / b_tasks if b_tasks else 0.0,
+                    "pass_rate": breakdown["passed"] / b_tasks if b_tasks else 0.0,
+                    "last_seen": breakdown["last_seen"],
+                }
+            )
+        breakdown_rows.sort(key=lambda item: (-item["tasks"], item["task_type"]))
+        tier = model_scoreboard_tier(tasks_count)
+        finalized.append(
+            {
+                "model": entry["model"],
+                "tier": tier,
+                "tasks": tasks_count,
+                "attempts": entry["attempts"],
+                "retries": entry["retries"],
+                "passed": entry["passed"],
+                "failed": entry["failed"],
+                "first_try_pass_rate": entry["first_try_passed"] / tasks_count if tasks_count else 0.0,
+                "pass_rate": entry["passed"] / tasks_count if tasks_count else 0.0,
+                "median_duration_ms": median_int(entry["_duration_ms"]),
+                "median_tokens": median_int(entry["_tokens"]),
+                "last_seen": entry["last_seen"],
+                "task_types": breakdown_rows,
+            }
+        )
+    return finalized
+
+
+def estimated_task_cost(row: dict[str, Any], catalog_model: dict[str, Any] | None) -> float | None:
+    median_tokens = row.get("median_tokens")
+    if median_tokens is None or catalog_model is None or catalog_model.get("variable_pricing"):
+        return None
+    try:
+        tokens = float(median_tokens)
+        prompt_per_m = float(catalog_model.get("prompt_per_m") or 0)
+        completion_per_m = float(catalog_model.get("completion_per_m") or 0)
+    except (TypeError, ValueError):
+        return None
+    return tokens * ((prompt_per_m + completion_per_m) / 2.0) / 1_000_000
+
+
+def model_sort_cost(row: dict[str, Any], catalog_model: dict[str, Any] | None) -> float:
+    cost = estimated_task_cost(row, catalog_model)
+    if cost is not None:
+        return cost
+    if row.get("median_tokens") is None:
+        return 0.0
+    return float("inf")
+
+
+def order_model_scoreboard_rows(
+    rows: list[dict[str, Any]],
+    catalog_by_id: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return sorted(
+        rows,
+        key=lambda row: (
+            model_scoreboard_tier_rank(str(row.get("tier") or "")),
+            -float(row.get("first_try_pass_rate") or 0),
+            -float(row.get("pass_rate") or 0),
+            model_sort_cost(row, catalog_by_id.get(str(row.get("model") or ""))),
+            str(row.get("model") or ""),
+        ),
+    )
+
+
+def fmt_percent(value: Any) -> str:
+    try:
+        return f"{float(value) * 100:.0f}%"
+    except (TypeError, ValueError):
+        return "0%"
+
+
+def fmt_int(value: Any) -> str:
+    try:
+        return f"{int(value):,}"
+    except (TypeError, ValueError):
+        return "0"
+
+
+def fmt_task_cost(value: float | None) -> str:
+    if value is None:
+        return ""
+    if value == 0:
+        return "$0/task"
+    if value < 0.01:
+        return f"${value:.4f}/task"
+    return f"${value:.2f}/task"
+
+
+def catalog_cost_html(row: dict[str, Any], catalog_model: dict[str, Any] | None) -> str:
+    median_tokens = row.get("median_tokens")
+    if catalog_model is None:
+        if median_tokens is None:
+            return '<span class="cost-line">included in plan</span>'
+        return '<span class="cost-line muted">catalog missing</span>'
+    if median_tokens is None:
+        return '<span class="cost-line">included in plan</span>'
+    variable = bool(catalog_model.get("variable_pricing"))
+    in_price = format_catalog_price(catalog_model.get("prompt_per_m"), variable=variable)
+    out_price = format_catalog_price(catalog_model.get("completion_per_m"), variable=variable)
+    if variable:
+        pieces = [f'<span class="cost-line">{html_escape(in_price)} $/M in · {html_escape(out_price)} $/M out</span>']
+    else:
+        pieces = [f'<span class="cost-line">${html_escape(in_price)}/M in · ${html_escape(out_price)}/M out</span>']
+    if catalog_model.get("free"):
+        pieces.append('<span class="flag free">FREE</span>')
+    if variable:
+        pieces.append('<span class="flag">var</span>')
+    est = estimated_task_cost(row, catalog_model)
+    est_text = fmt_task_cost(est)
+    if est_text:
+        pieces.append(f'<span class="cost-line">{html_escape(est_text)}</span>')
+    return " ".join(pieces)
+
+
+def derived_quality_text(row: dict[str, Any], *, best: bool) -> str:
+    candidates = [item for item in row.get("task_types", []) if int(item.get("tasks") or 0) >= 2]
+    if not candidates:
+        return "not enough per-task evidence yet"
+    if best:
+        chosen = max(candidates, key=lambda item: (float(item.get("first_try_pass_rate") or 0), int(item.get("tasks") or 0), str(item.get("task_type") or "")))
+        prefix = "best derived"
+    else:
+        chosen = min(candidates, key=lambda item: (float(item.get("first_try_pass_rate") or 0), -int(item.get("tasks") or 0), str(item.get("task_type") or "")))
+        prefix = "worst derived"
+    return (
+        f"{prefix}: {chosen['task_type']} "
+        f"({fmt_percent(chosen.get('first_try_pass_rate'))} first-try, "
+        f"{fmt_percent(chosen.get('pass_rate'))} pass, n={fmt_int(chosen.get('tasks'))})"
+    )
+
+
+def render_task_breakdown_table(task_rows: list[dict[str, Any]]) -> str:
+    if not task_rows:
+        return '<p class="empty-note">no task-type breakdown</p>'
+    rows = []
+    for item in task_rows:
+        rows.append(
+            f"""<tr>
+      <td>{html_escape(str(item.get("task_type") or ""))}</td>
+      <td class="mono">{fmt_int(item.get("tasks"))}</td>
+      <td class="mono">{fmt_percent(item.get("first_try_pass_rate"))}</td>
+      <td class="mono">{fmt_percent(item.get("pass_rate"))}</td>
+    </tr>"""
+        )
+    return f"""<table class="breakdown">
+    <thead><tr><th>task_type</th><th>n</th><th>first-try</th><th>pass</th></tr></thead>
+    <tbody>{"".join(rows)}</tbody>
+  </table>"""
+
+
+MODEL_SCOREBOARD_CSS = """
+  .scoreboard-page { max-width: 1180px; }
+  .scoreboard-briefing { max-width: 44ch; }
+  .source-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+    margin: 0 0 clamp(18px, 3vw, 28px);
+  }
+  .source-box {
+    border: 1px solid var(--hairline);
+    background: color-mix(in srgb, var(--surface) 76%, transparent);
+    padding: 12px;
+    min-width: 0;
+  }
+  .source-box b { display: block; font-size: 12px; color: var(--muted); }
+  .source-box span { display: block; overflow-wrap: anywhere; }
+  .watchlist {
+    border-top: 1px solid var(--hairline);
+    border-bottom: 1px solid var(--hairline);
+    padding: 14px 0;
+    margin: 0 0 18px;
+  }
+  .watchlist h2, .models h2 {
+    margin: 0 0 10px;
+    font-size: 16px;
+  }
+  .watch-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 16px;
+  }
+  .tag-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .tag-list li, .flag {
+    border: 1px solid var(--hairline);
+    padding: 3px 7px;
+    font-size: 12px;
+    color: var(--ink);
+    background: rgba(255, 255, 255, .03);
+  }
+  .flag.free { color: var(--pass); border-color: color-mix(in srgb, var(--pass) 55%, var(--hairline)); }
+  .event-list { margin: 0; padding-left: 18px; color: var(--muted); }
+  .model-card {
+    border: 1px solid var(--hairline);
+    background: var(--surface);
+    margin: 12px 0;
+  }
+  .model-summary {
+    display: grid;
+    grid-template-columns: minmax(70px, .45fr) minmax(240px, 1.6fr) minmax(180px, .9fr) minmax(170px, .9fr);
+    gap: 12px;
+    padding: 14px;
+    align-items: start;
+  }
+  .rank { font-size: 24px; font-weight: 800; line-height: 1; }
+  .tier { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  .model-name { font-size: 19px; font-weight: 800; overflow-wrap: anywhere; }
+  .metric-row {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .metric-row b { color: var(--ink); }
+  .cost-line { display: inline-block; margin: 0 8px 6px 0; }
+  .quality {
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .quality b { color: var(--ink); }
+  .model-detail {
+    border-top: 1px solid var(--hairline);
+    padding: 0 14px 14px;
+  }
+  .model-detail summary {
+    cursor: pointer;
+    color: var(--accent);
+    padding: 10px 0;
+    font-size: 13px;
+  }
+  .detail-grid {
+    display: grid;
+    grid-template-columns: minmax(0, .95fr) minmax(0, 1.05fr);
+    gap: 16px;
+  }
+  .breakdown {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  .breakdown th, .breakdown td {
+    border-bottom: 1px solid var(--hairline);
+    padding: 7px 6px;
+    text-align: left;
+  }
+  .notes-list { margin: 0; padding-left: 18px; color: var(--ink); }
+  .notes-list li { margin: 0 0 8px; }
+  .muted { color: var(--muted); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+  @media (max-width: 820px) {
+    .source-grid, .watch-grid, .detail-grid, .model-summary { grid-template-columns: 1fr; }
+    .rank { font-size: 20px; }
+  }
+"""
+
+
+def render_free_watchlist(catalog_models: list[dict[str, Any]], catalog_path: Path) -> str:
+    normalized = [normalize_catalog_for_scoreboard(model) for model in catalog_models]
+    free_models = sorted(
+        (model for model in normalized if model.get("free")),
+        key=lambda item: (-int(item.get("context_length") or 0), str(item.get("id") or "")),
+    )
+    if free_models:
+        free_items = "".join(
+            f"<li>{html_escape(str(model.get('id') or ''))} · {fmt_int(model.get('context_length'))} ctx</li>"
+            for model in free_models[:12]
+        )
+    else:
+        free_items = '<li class="muted">no FREE catalog models in the current snapshot</li>'
+    events = read_catalog_events(catalog_changes_path(catalog_path), limit=6)
+    event_items = "".join(f"<li>{html_escape(describe_catalog_event(event))}</li>" for event in events)
+    if not event_items:
+        event_items = '<li class="muted">no catalog change log found</li>'
+    return f"""<section class="watchlist" aria-labelledby="watchlist-heading">
+    <h2 id="watchlist-heading">Free promo watchlist</h2>
+    <div class="watch-grid">
+      <div><ul class="tag-list">{free_items}</ul></div>
+      <div><ol class="event-list">{event_items}</ol></div>
+    </div>
+  </section>"""
+
+
+def render_model_card(
+    row: dict[str, Any],
+    *,
+    rank: int,
+    catalog_model: dict[str, Any] | None,
+    notes_sections: dict[str, list[str]],
+) -> str:
+    model_id = str(row.get("model") or "")
+    notes = model_judgment_notes(model_id, notes_sections)
+    median_tokens = "none" if row.get("median_tokens") is None else fmt_int(row.get("median_tokens"))
+    return f"""<article class="model-card" id="model-{html_escape(sanitize_artifact_name(model_id))}">
+  <div class="model-summary">
+    <div>
+      <div class="rank">#{rank}</div>
+      <div class="tier">{html_escape(str(row.get("tier") or ""))}</div>
+    </div>
+    <div>
+      <div class="model-name">{html_escape(model_id)}</div>
+      <div class="metric-row">
+        <span><b>n={fmt_int(row.get("tasks"))}</b> tasks</span>
+        <span><b>{fmt_int(row.get("attempts"))}</b> attempts</span>
+        <span><b>{fmt_int(row.get("retries"))}</b> retries</span>
+        <span><b>{fmt_percent(row.get("first_try_pass_rate"))}</b> first-try</span>
+        <span><b>{fmt_percent(row.get("pass_rate"))}</b> pass</span>
+      </div>
+      <div class="metric-row">
+        <span>last_seen <b>{html_escape(str(row.get("last_seen") or "unknown"))}</b></span>
+        <span>median worker_tokens <b>{html_escape(median_tokens)}</b></span>
+      </div>
+    </div>
+    <div>{catalog_cost_html(row, catalog_model)}</div>
+    <div class="quality">
+      <div><b>Best:</b> {html_escape(derived_quality_text(row, best=True))}</div>
+      <div><b>Worst:</b> {html_escape(derived_quality_text(row, best=False))}</div>
+    </div>
+  </div>
+  <details class="model-detail" open>
+    <summary>usage and judgment notes</summary>
+    <div class="detail-grid">
+      <div>{render_task_breakdown_table(row.get("task_types", []))}</div>
+      <div>
+        <div class="tier">judgment notes from MODEL-NOTES.md</div>
+        {render_notes_list(notes)}
+      </div>
+    </div>
+  </details>
+</article>"""
+
+
+def render_model_scoreboard_html(
+    *,
+    rows: list[dict[str, Any]],
+    log_path: Path,
+    rows_read: int,
+    skipped: int,
+    catalog_path: Path,
+    catalog_models: list[dict[str, Any]],
+    notes_path: Path,
+    notes_sections: dict[str, list[str]],
+    generated_at: str | None = None,
+) -> str:
+    catalog_by_id = catalog_models_by_id(catalog_models)
+    ordered = order_model_scoreboard_rows(rows, catalog_by_id)
+    generated = generated_at or datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    cards = "".join(
+        render_model_card(
+            row,
+            rank=index,
+            catalog_model=catalog_by_id.get(str(row.get("model") or "")),
+            notes_sections=notes_sections,
+        )
+        for index, row in enumerate(ordered, start=1)
+    )
+    if not cards:
+        cards = '<p class="empty-note">No local model evidence matched these filters.</p>'
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+{CSP_META_TAG}
+<title>ringer model scoreboard</title>
+<style>{ARTIFACT_BASE_CSS}
+{MODEL_SCOREBOARD_CSS}</style>
+</head>
+<body>
+<div class="page scoreboard-page">
+  <header class="corner">
+    <span class="live-dot pass" aria-hidden="true"></span>
+    <span class="eyebrow">Ringer &nbsp;·&nbsp; <b>model-scoreboard</b></span>
+    <span class="clock mono">Generated {html_escape(generated)}</span>
+  </header>
+  <h1 class="briefing scoreboard-briefing">Model performance scoreboard</h1>
+  <section class="source-grid" aria-label="scoreboard sources">
+    <div class="source-box"><b>Log</b><span class="mono">{html_escape(str(log_path))}</span></div>
+    <div class="source-box"><b>Catalog</b><span class="mono">{html_escape(str(catalog_path))}</span></div>
+    <div class="source-box"><b>Notes</b><span class="mono">{html_escape(str(notes_path))}</span></div>
+    <div class="source-box"><b>Rows</b><span>{fmt_int(rows_read)} read · {fmt_int(skipped)} skipped · {fmt_int(len(ordered))} models</span></div>
+  </section>
+  {render_free_watchlist(catalog_models, catalog_path)}
+  <section class="models" aria-labelledby="models-heading">
+    <h2 id="models-heading">Ranked models</h2>
+    {cards}
+  </section>
+  <footer>
+    <span>Ranking sorts by evidence tier first: proven n>=3, then probation, then untested-with-rows; ties use first-try pass rate, pass rate, then lower estimated cost.</span>
+    <span>Cost estimate assumes logged worker_tokens are split 50/50 between prompt and completion tokens, using the catalog $/M in/out blend.</span>
+  </footer>
+</div>
+</body>
+</html>
+"""
+
+
+def write_model_scoreboard_html(
+    config: AppConfig,
+    *,
+    path: Path | None,
+    rows: list[dict[str, Any]],
+    log_path: Path,
+    rows_read: int,
+    skipped: int,
+    catalog_path: Path,
+    catalog_models: list[dict[str, Any]],
+    notes_path: Path,
+    notes_sections: dict[str, list[str]],
+) -> Path:
+    target = path
+    if target is None:
+        target = artifact_live_path(config.state_dir, MODEL_SCOREBOARD_RUN_NAME)
+    target = target.expanduser().resolve()
+    html = render_model_scoreboard_html(
+        rows=rows,
+        log_path=log_path,
+        rows_read=rows_read,
+        skipped=skipped,
+        catalog_path=catalog_path,
+        catalog_models=catalog_models,
+        notes_path=notes_path,
+        notes_sections=notes_sections,
+    )
+    atomic_write_text(target, html)
+    if path is None:
+        update_artifact_library_live(
+            config.state_dir,
+            run_name=MODEL_SCOREBOARD_RUN_NAME,
+            run_id=MODEL_SCOREBOARD_RUN_NAME,
+            identity=MODEL_SCOREBOARD_IDENTITY,
+            state="pass",
+        )
+    return target
+
+
 def print_model_log_table(path: Path, rows_read: int, skipped: int, groups: list[dict[str, Any]]) -> None:
     print(f"Model log: {path} ({rows_read} rows, {skipped} skipped lines)")
     header = (
@@ -4398,6 +5046,32 @@ def run_models_command(config: AppConfig, args: argparse.Namespace) -> int:
             catalog_path=catalog_path,
             catalog_models=catalog_models,
         )
+        return 0
+    html_arg = getattr(args, "html", None)
+    open_requested = bool(getattr(args, "open", False))
+    if html_arg is not None or open_requested:
+        catalog_path = (args.catalog_file or default_catalog_path()).expanduser().resolve()
+        catalog_models = load_catalog_snapshot(catalog_path)
+        notes_path = (getattr(args, "notes_file", None) or default_model_notes_path()).expanduser().resolve()
+        scoreboard_rows = aggregate_model_scoreboard_rows(rows, task_type=args.task_type, model=args.model)
+        explicit_path = None
+        if html_arg not in {None, ""} and not open_requested:
+            explicit_path = Path(str(html_arg))
+        page_path = write_model_scoreboard_html(
+            config,
+            path=explicit_path,
+            rows=scoreboard_rows,
+            log_path=log_path,
+            rows_read=len(rows),
+            skipped=skipped,
+            catalog_path=catalog_path,
+            catalog_models=catalog_models,
+            notes_path=notes_path,
+            notes_sections=parse_model_notes_sections(notes_path),
+        )
+        print(page_path)
+        if open_requested:
+            open_in_browser(file_href(page_path))
         return 0
     if args.json:
         print(json.dumps(groups))
@@ -5861,6 +6535,9 @@ def build_parser() -> argparse.ArgumentParser:
     models_parser.add_argument("--since", help="only include rows logged on or after YYYY-MM-DD")
     models_parser.add_argument("--explore", action="store_true", help="show proven/probation tiers plus cheap untested catalog candidates")
     models_parser.add_argument("--catalog-file", type=Path, help="path to local OpenRouter catalog snapshot")
+    models_parser.add_argument("--notes-file", type=Path, default=default_model_notes_path(), help="path to MODEL-NOTES.md judgment layer")
+    models_parser.add_argument("--html", nargs="?", const="", help="render a self-contained HTML scoreboard; optional output path")
+    models_parser.add_argument("--open", action="store_true", help="render the HTML scoreboard to the artifact library and open it")
     models_parser.add_argument("--json", action="store_true", help="print the scoreboard as JSON")
 
     catalog_parser = subparsers.add_parser("catalog", help="show or refresh the local OpenRouter model catalog")

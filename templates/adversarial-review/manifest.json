@@ -7,6 +7,7 @@
       "key": "reviewer-a",
       "engine": "{{REVIEW_ENGINE}}",
       "model": "{{MODEL_A}}",
+      "task_type": "code-review",
       "timeout_s": 1800,
       "expect_files": [
         "report.md"
@@ -19,6 +20,7 @@
       "key": "reviewer-b",
       "engine": "{{REVIEW_ENGINE}}",
       "model": "{{MODEL_B}}",
+      "task_type": "code-review",
       "timeout_s": 1800,
       "expect_files": [
         "report.md"
@@ -31,6 +33,7 @@
       "key": "reviewer-c",
       "engine": "{{REVIEW_ENGINE}}",
       "model": "{{MODEL_C}}",
+      "task_type": "code-review",
       "timeout_s": 1800,
       "expect_files": [
         "report.md"

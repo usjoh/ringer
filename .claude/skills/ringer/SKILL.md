@@ -216,9 +216,17 @@ per task via the manifest `engine` field. Defaults are deliberate:
   multi-turn harness tasks — watch their retry counts before scaling them.
 - Match `timeout_s` to the task: conversational harness tasks and
   build-and-test checks need far more than file edits.
-- **Read `docs/MODEL-NOTES.md` (in the ringer repo) before assigning
-  models to tasks** — it's the running record of how models actually
-  performed, per task type, backed by executed checks.
+- **Check the evidence before assigning models to tasks.** Run
+  `./ringer.py models` (optionally `--task-type <type>`) — the local
+  scoreboard aggregating every executed-check outcome per (model,
+  task_type): first_try_pass_rate is the routing signal; pass_rate includes
+  retry rescues. Then read `docs/MODEL-NOTES.md` (in the ringer repo) for
+  the judgment the numbers can't carry. Routing is grounded in performance,
+  not vibes (Jon directive 2026-07-06).
+- **Give every task a `task_type`** (canonical vocabulary in the README —
+  code-feature, code-fix, code-review, research, persona-review, site-build,
+  image-gen, docs, probe, bakeoff, ...). Untyped tasks bucket as (untyped)
+  and teach the scoreboard nothing; lint nudges you when it's missing.
 
 ## Worktrees-mode footguns (learned the hard way)
 
@@ -258,7 +266,9 @@ someone's untracked scratch files.
 5. **Update `docs/MODEL-NOTES.md`** (in the ringer repo) when a run taught
    you something about a model: one dated line under the model — task type,
    what happened (attempts, tokens, failure mode), what you'd do
-   differently. Only what the executed checks and raw logs support.
+   differently. Only what the executed checks and raw logs support. The raw
+   numbers took care of themselves — every attempt already landed in the
+   local model log (`./ringer.py models` to see the updated scoreboard).
 
 ## Baked-in invariants (preserve in any change to ringer.py)
 

@@ -6,6 +6,7 @@
     {
       "key": "site-final",
       "engine": "{{ENGINE_BUILD}}",
+      "task_type": "site-build",
       "timeout_s": 2400,
       "expect_files": [
         "site.html"

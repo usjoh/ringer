@@ -6,6 +6,7 @@
     {
       "key": "{{TASK_KEY}}",
       "engine": "{{ENGINE_BUILD}}",
+      "task_type": "code-feature",
       "timeout_s": 2400,
       "expect_files": [
         "notes.md"

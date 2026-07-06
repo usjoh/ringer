@@ -385,6 +385,7 @@ class TaskSpec:
     # Which model a harness engine should run for this task (fills the
     # engine's {model} placeholder); empty means the engine's model_default.
     model: str = ""
+    task_type: str = ""
 
     @classmethod
     def from_obj(cls, obj: dict[str, Any]) -> "TaskSpec":
@@ -422,6 +423,9 @@ class TaskSpec:
         model = obj.get("model", "")
         if not isinstance(model, str):
             raise ValueError(f"task {key}: model must be a string (e.g. 'openrouter/z-ai/glm-5.2')")
+        task_type = obj.get("task_type", "")
+        if not isinstance(task_type, str):
+            raise ValueError(f"task {key}: task_type must be a string")
         return cls(
             key=key,
             spec=spec,
@@ -433,6 +437,7 @@ class TaskSpec:
             engine_args=tuple(engine_args),
             verified=verified.strip(),
             model=model.strip(),
+            task_type=task_type.strip(),
         )
 
 
@@ -525,7 +530,7 @@ class Manifest:
 FILE_TEST_OPS = {"-e", "-f", "-s", "-d", "-r", "-w", "-x", "-L"}
 
 
-def lint_manifest(manifest: Manifest) -> list[str]:
+def lint_manifest(manifest: Manifest, *, include_model_log_nudges: bool = False) -> list[str]:
     findings: list[str] = []
 
     for task in manifest.tasks:
@@ -561,6 +566,11 @@ def lint_manifest(manifest: Manifest) -> list[str]:
             findings.append(
                 f"{task.key}: no 'verified' description; a reader of the results page sees "
                 "'checked' but not what the check proves — add one plain-English sentence."
+            )
+        if include_model_log_nudges and not task.task_type:
+            findings.append(
+                f"{task.key}: no task_type; the model log buckets this as (untyped) — "
+                "name one (e.g. code-feature, research, image-gen) so './ringer.py models' can guide routing."
             )
 
     if len(manifest.tasks) >= 3 and manifest.max_parallel == 1:
@@ -3485,8 +3495,12 @@ class EvalLogger:
             self._connect()
 
     def log_attempt(self, row: dict[str, Any]) -> None:
-        db_row = dict(row)
         if self._conn is not None:
+            db_row = {
+                key: value
+                for key, value in row.items()
+                if key not in {"model", "task_type", "retry"}
+            }
             try:
                 self._conn.execute(
                     """
@@ -3506,7 +3520,7 @@ class EvalLogger:
             except Exception as exc:
                 self._fallback_reason = f"Supabase insert failed: {exc}"
                 self._close_conn()
-        self._write_jsonl(db_row)
+        self._write_jsonl(row)
 
     def close(self) -> None:
         self._close_conn()
@@ -3563,12 +3577,247 @@ class EvalLogger:
             self._conn = None
 
 
+def parse_log_date(value: Any) -> str:
+    if not isinstance(value, str) or len(value) < 10:
+        return ""
+    candidate = value[:10]
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", candidate):
+        return ""
+    try:
+        datetime.strptime(candidate, "%Y-%m-%d")
+    except ValueError:
+        return ""
+    return candidate
+
+
+def validate_since_date(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not parse_log_date(value):
+        raise ValueError("--since must be YYYY-MM-DD")
+    return value
+
+
+def model_log_row_is_retry(row: dict[str, Any]) -> bool:
+    retry = row.get("retry")
+    if isinstance(retry, bool):
+        return retry
+    if isinstance(retry, str) and retry.strip().lower() in {"true", "false"}:
+        return retry.strip().lower() == "true"
+    notes = row.get("notes", "")
+    return isinstance(notes, str) and "retry=true" in notes
+
+
+def model_log_text(value: Any) -> str:
+    return "" if value is None else str(value).strip()
+
+
+def model_log_row_model(row: dict[str, Any]) -> str:
+    model = model_log_text(row.get("model"))
+    if model:
+        return model
+    return model_log_text(row.get("worker_engine"))
+
+
+def model_log_row_task_type(row: dict[str, Any]) -> str:
+    task_type = model_log_text(row.get("task_type"))
+    return task_type or "(untyped)"
+
+
+def model_log_int(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def median_int(values: list[int]) -> int | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) // 2
+
+
+def read_model_log_rows(
+    path: Path,
+    *,
+    since: str | None = None,
+    engine: str | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    rows: list[dict[str, Any]] = []
+    skipped = 0
+    try:
+        fh = path.open("r", encoding="utf-8")
+    except FileNotFoundError:
+        return rows, skipped
+    with fh:
+        for line in fh:
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                skipped += 1
+                continue
+            if not isinstance(row, dict):
+                skipped += 1
+                continue
+            if since is not None:
+                logged_date = parse_log_date(row.get("logged_at"))
+                if not logged_date or logged_date < since:
+                    continue
+            if engine is not None and model_log_text(row.get("worker_engine")) != engine:
+                continue
+            rows.append(row)
+    return rows, skipped
+
+
+def aggregate_model_log_rows(
+    rows: list[dict[str, Any]],
+    *,
+    task_type: str | None = None,
+    model: str | None = None,
+) -> list[dict[str, Any]]:
+    tasks: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        run_id = model_log_text(row.get("run_id"))
+        task_key = model_log_text(row.get("task_key"))
+        tasks.setdefault((run_id, task_key), []).append(row)
+
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for task_rows in tasks.values():
+        ordered = sorted(
+            task_rows,
+            key=lambda row: (
+                model_log_text(row.get("logged_at")),
+                1 if model_log_row_is_retry(row) else 0,
+            ),
+        )
+        first = ordered[0]
+        final = ordered[-1]
+        group_model = model_log_row_model(final)
+        group_task_type = model_log_row_task_type(final)
+        if model is not None and group_model != model:
+            continue
+        if task_type is not None and group_task_type != task_type:
+            continue
+        key = (group_model, group_task_type)
+        group = groups.setdefault(
+            key,
+            {
+                "model": group_model,
+                "task_type": group_task_type,
+                "tasks": 0,
+                "attempts": 0,
+                "passed": 0,
+                "failed": 0,
+                "pass_rate": 0.0,
+                "first_try_pass_rate": 0.0,
+                "median_duration_ms": None,
+                "median_tokens": None,
+                "last_seen": "",
+                "_first_try_passed": 0,
+                "_duration_ms": [],
+                "_tokens": [],
+            },
+        )
+        group["tasks"] += 1
+        group["attempts"] += len(ordered)
+        if model_log_text(final.get("verdict")).upper() == "PASS":
+            group["passed"] += 1
+        else:
+            group["failed"] += 1
+        if model_log_text(first.get("verdict")).upper() == "PASS":
+            group["_first_try_passed"] += 1
+        duration_ms = model_log_int(final.get("duration_ms"))
+        if duration_ms is not None:
+            group["_duration_ms"].append(duration_ms)
+        for row in ordered:
+            tokens = model_log_int(row.get("worker_tokens"))
+            if tokens is not None:
+                group["_tokens"].append(tokens)
+        logged_at = model_log_text(final.get("logged_at"))
+        if logged_at > group["last_seen"]:
+            group["last_seen"] = logged_at
+
+    finalized: list[dict[str, Any]] = []
+    for group in groups.values():
+        tasks_count = group["tasks"]
+        group["pass_rate"] = group["passed"] / tasks_count if tasks_count else 0.0
+        group["first_try_pass_rate"] = (
+            group["_first_try_passed"] / tasks_count if tasks_count else 0.0
+        )
+        group["median_duration_ms"] = median_int(group["_duration_ms"])
+        group["median_tokens"] = median_int(group["_tokens"])
+        finalized.append(
+            {
+                "model": group["model"],
+                "task_type": group["task_type"],
+                "tasks": group["tasks"],
+                "attempts": group["attempts"],
+                "passed": group["passed"],
+                "failed": group["failed"],
+                "pass_rate": group["pass_rate"],
+                "first_try_pass_rate": group["first_try_pass_rate"],
+                "median_duration_ms": group["median_duration_ms"],
+                "median_tokens": group["median_tokens"],
+                "last_seen": group["last_seen"],
+            }
+        )
+    return sorted(
+        finalized,
+        key=lambda item: (
+            item["task_type"],
+            -item["pass_rate"],
+            -item["first_try_pass_rate"],
+            item["model"],
+        ),
+    )
+
+
+def print_model_log_table(path: Path, rows_read: int, skipped: int, groups: list[dict[str, Any]]) -> None:
+    print(f"Model log: {path} ({rows_read} rows, {skipped} skipped lines)")
+    header = (
+        f"{'task_type':<18} {'model':<32} {'tasks':>5} {'attempts':>8} "
+        f"{'passed':>6} {'failed':>6} {'pass':>6} {'first':>6} "
+        f"{'dur_ms':>8} {'tokens':>8} {'last_seen'}"
+    )
+    print(header)
+    print("-" * len(header))
+    for group in groups:
+        duration = "" if group["median_duration_ms"] is None else str(group["median_duration_ms"])
+        tokens = "" if group["median_tokens"] is None else str(group["median_tokens"])
+        print(
+            f"{group['task_type']:<18} {shorten(group['model'], 32):<32} "
+            f"{group['tasks']:>5} {group['attempts']:>8} {group['passed']:>6} "
+            f"{group['failed']:>6} {group['pass_rate']:>6.2f} "
+            f"{group['first_try_pass_rate']:>6.2f} {duration:>8} "
+            f"{tokens:>8} {group['last_seen']}"
+        )
+    print("Judgment layer: docs/MODEL-NOTES.md")
+
+
+def run_models_command(config: AppConfig, args: argparse.Namespace) -> int:
+    log_path = (args.log or config.eval.jsonl_path).expanduser().resolve()
+    since = validate_since_date(args.since)
+    rows, skipped = read_model_log_rows(log_path, since=since, engine=args.engine)
+    groups = aggregate_model_log_rows(rows, task_type=args.task_type, model=args.model)
+    if args.json:
+        print(json.dumps(groups))
+    else:
+        print_model_log_table(log_path, len(rows), skipped, groups)
+    return 0
+
+
 class Verifier:
     async def verify(self, task: TaskSpec, taskdir: Path) -> VerifyResult:
+        check_returncode, check_timed_out, output = await self._run_check(task.check, taskdir)
         missing_files = tuple(
             rel for rel in task.expect_files if not self._is_nonempty_file(self._expect_file_path(taskdir, rel))
         )
-        check_returncode, check_timed_out, output = await self._run_check(task.check, taskdir)
         ok = not missing_files and not check_timed_out and check_returncode == 0
         if missing_files:
             missing_message = f"[ringer] missing expected files: {', '.join(missing_files)}"
@@ -3703,6 +3952,7 @@ class RingerRunner:
                 self.dashboard.stop()
             self.logger.close()
             print_summary(self.run_id, self.runtimes)
+            print("Model log updated; run './ringer.py models' for the per-model scoreboard.")
             # The post-run journey: tell a human exactly where the results live.
             with contextlib.suppress(Exception):
                 if self.state_writer.artifact is not None and self.state_writer.artifact.enabled:
@@ -4034,9 +4284,13 @@ class RingerRunner:
         verdict: str,
         duration_ms: int,
     ) -> None:
+        engine = self.config.engines.get(runtime.task.engine)
+        resolved_model = runtime.task.model or (engine.model_default if engine else "")
         notes_parts = [
             f"retry={'true' if retrying else 'false'}",
             f"worker_returncode={worker.returncode}",
+            f"model={resolved_model}",
+            f"task_type={runtime.task.task_type}",
         ]
         if worker.error:
             notes_parts.append(f"worker_error={worker.error}")
@@ -4058,6 +4312,9 @@ class RingerRunner:
                 "worker_tokens": worker.tokens,
                 "notes": "\n".join(notes_parts),
                 "orchestrator": self.identity,
+                "model": resolved_model,
+                "task_type": runtime.task.task_type,
+                "retry": retrying,
             }
         )
 
@@ -4919,7 +5176,8 @@ def ensure_hud_running(config: AppConfig, *, open_browser: bool) -> None:
     """
     port = config.hud_port
     url = f"http://127.0.0.1:{port}"
-    if not hud_is_alive(port):
+    already_alive = hud_is_alive(port)
+    if not already_alive:
         log_path = config.state_dir / "hud.log"
         with contextlib.suppress(Exception):
             log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -4935,7 +5193,7 @@ def ensure_hud_running(config: AppConfig, *, open_browser: bool) -> None:
             if hud_is_alive(port):
                 break
             time.sleep(0.15)
-    if open_browser and hud_is_alive(port):
+    if open_browser and not already_alive and hud_is_alive(port):
         open_in_browser(url)
     print(f"Ringside: {url}", flush=True)
 
@@ -4999,6 +5257,15 @@ def build_parser() -> argparse.ArgumentParser:
     hud_parser.add_argument("--port", type=int, help=f"port to bind on 127.0.0.1 (default: {DEFAULT_HUD_PORT})")
     hud_parser.add_argument("--no-open", action="store_true", help="start the server without opening a browser")
 
+    models_parser = subparsers.add_parser("models", help="show the local per-model performance scoreboard")
+    models_parser.add_argument("--config", type=Path, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    models_parser.add_argument("--log", type=Path, help="path to local eval JSONL log")
+    models_parser.add_argument("--task-type", help="only include one task_type bucket")
+    models_parser.add_argument("--model", help="only include one resolved model bucket")
+    models_parser.add_argument("--engine", help="only include rows from one worker engine")
+    models_parser.add_argument("--since", help="only include rows logged on or after YYYY-MM-DD")
+    models_parser.add_argument("--json", action="store_true", help="print the scoreboard as JSON")
+
     demo_parser = subparsers.add_parser("demo", help="generate and run a 3-task toy manifest in /tmp")
     demo_parser.add_argument("--config", type=Path, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     demo_parser.add_argument("--max-parallel", type=int, help="override demo max_parallel")
@@ -5042,6 +5309,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         config = AppConfig.load(args.config)
+        if args.command == "models":
+            return run_models_command(config, args)
         if args.command == "hud":
             return run_persistent_hud(
                 config,
@@ -5055,7 +5324,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             manifest_path = args.manifest
         manifest = Manifest.from_path(manifest_path).with_max_parallel(args.max_parallel)
-        print_lint_findings(lint_manifest(manifest))
+        print_lint_findings(lint_manifest(manifest, include_model_log_nudges=True))
         validate_manifest_engines(manifest, config)
         identity_start_paths = [manifest.workdir]
         if manifest.source_path is not None:

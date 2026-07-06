@@ -6,6 +6,7 @@
     {
       "key": "{{PERSONA_KEY}}",
       "engine": "{{ENGINE_CHEAP}}",
+      "task_type": "persona-review",
       "timeout_s": 900,
       "expect_files": [
         "report.md"
@@ -17,6 +18,7 @@
     {
       "key": "brand-kit",
       "engine": "{{ENGINE_BUILD}}",
+      "task_type": "copywriting",
       "timeout_s": 1200,
       "expect_files": [
         "brand-kit.md"

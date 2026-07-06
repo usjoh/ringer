@@ -98,6 +98,7 @@ Each task gets its own directory, its own worker, its own log, and its own verdi
 | `expect_files` | Files that must exist and be non-empty before the check runs |
 | `engine` | Which configured engine runs this task (default `codex`) |
 | `model` | Which model a harness engine runs for this task — fills the engine's `{model}` placeholder (e.g. `"openrouter/moonshotai/kimi-k2.7"`); empty uses the engine's `model_default` |
+| `task_type` | Optional free-form string naming the kind of work this task is, so the model-performance log can slice pass rates by task shape rather than only by model. Suggested vocabulary: `code-feature`, `code-fix`, `code-review`, `test-hardening`, `docs`, `research`, `persona-review`, `copywriting`, `site-build`, `motion-design`, `image-gen`, `data-pipeline`, `format-conversion`, `probe`, `bakeoff`. Empty is allowed; the log just reports it under `(none)`. |
 | `timeout_s` | Per-task kill timer (default 900) |
 | `engine_args` | Extra CLI flags for this task's worker, spliced in at the engine's `{engine_args}` placeholder — e.g. `["-c", "model_reasoning_effort=low"]` so the orchestrator picks reasoning depth per task |
 | `verified` | One plain-English sentence saying what the check proves — shown on the results page next to "finished & checked" |
@@ -198,6 +199,37 @@ A native desktop build (Tauri, under `hud/`) exists as a v0.1.1 prototype; the w
 ![Timed, verified, logged](docs/eval-loop.png)
 
 Every worker attempt — pass, fail, timeout, retry — is logged with its spec, engine, duration, token count, and the raw check output. Local JSONL by default; point `[eval.postgres]` at a database to aggregate across machines. Failure rows are the point: they tell you which spec styles, engines, and task shapes actually work, so the swarm gets better on evidence instead of vibes.
+
+## Model performance log
+
+Every task attempt is logged **automatically and locally** to `~/.ringer/runs.jsonl` — no setup, no account, nothing leaves your machine. Each row carries the per-attempt verdict straight from the EXECUTED check, plus duration, tokens, the resolved `model`, the task's `task_type` (if the manifest set one), and the `retry` number.
+
+Read it with:
+
+```bash
+./ringer.py models          # per-(model, task_type) scoreboard across the local log
+```
+
+The scoreboard reports, per model and task_type: tasks, attempts, `pass_rate`, `first_try_pass_rate`, median duration and token count, and `last_seen`. The signal for routing is `first_try_pass_rate` — the share of tasks that passed on attempt 1 without a retry; `pass_rate` is the rescued rate after Ringer's single retry, so the gap between the two is the cost of the retry lane. Slice the log with `--log` (a different JSONL), `--task-type`, `--model`, `--engine`, `--since`, or `--json` for piping elsewhere.
+
+History from before the `model` / `task_type` / `retry` columns existed can be seeded in one pass:
+
+```bash
+./scripts/backfill_model_log.py \
+  --log ~/.ringer/runs.jsonl \
+  --runs-dir ~/.ringer/runs \
+  --mapping mapping.json
+```
+
+The `--mapping` file joins old log rows to a `task_type`. Each line uses one of three key forms, applied in order:
+
+- `run_id:task_key` — names one task in one run (most specific).
+- `run_id` — names every task in that run.
+- `name:prefix` — names every task whose key begins with `prefix`, across all runs (least specific, the usual way to cover a whole kit's keys).
+
+Rows that match nothing keep their old `task_type` (empty); rows whose run-state JSON can't be found keep their old `model`.
+
+`docs/MODEL-NOTES.md` is where the human-readable judgment lives on top of these numbers — the scoreboard tells you the pass rates; the notes tell you why a model shines or chokes on a given task shape.
 
 ## Hard-won invariants
 

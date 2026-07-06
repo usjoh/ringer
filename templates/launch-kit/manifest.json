@@ -6,6 +6,7 @@
     {
       "key": "market-read",
       "engine": "{{ENGINE_RESEARCH}}",
+      "task_type": "research",
       "timeout_s": 1200,
       "expect_files": [
         "report.md"
@@ -17,6 +18,7 @@
     {
       "key": "names-and-pitches",
       "engine": "{{ENGINE_CHEAP}}",
+      "task_type": "copywriting",
       "timeout_s": 900,
       "expect_files": [
         "candidates.md"
@@ -28,6 +30,7 @@
     {
       "key": "hero-image",
       "engine": "{{ENGINE_CHEAP}}",
+      "task_type": "image-gen",
       "timeout_s": 1800,
       "expect_files": [
         "hero.png"
@@ -39,6 +42,7 @@
     {
       "key": "brand-board",
       "engine": "{{ENGINE_CHEAP}}",
+      "task_type": "copywriting",
       "timeout_s": 900,
       "expect_files": [
         "brand-board.md"
@@ -50,6 +54,7 @@
     {
       "key": "listing-copy",
       "engine": "{{ENGINE_CHEAP}}",
+      "task_type": "copywriting",
       "timeout_s": 900,
       "expect_files": [
         "listing-copy.md"
@@ -61,6 +66,7 @@
     {
       "key": "site-v1",
       "engine": "{{ENGINE_BUILD}}",
+      "task_type": "site-build",
       "timeout_s": 2400,
       "expect_files": [
         "site.html"

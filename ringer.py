@@ -16,6 +16,11 @@ import socket
 import subprocess
 import sys
 
+try:
+    import sqlite3
+except Exception:  # pragma: no cover - exercised by monkeypatch in tests.
+    sqlite3 = None  # type: ignore[assignment]
+
 if sys.version_info < (3, 11):
     raise SystemExit(
         f"ringer requires Python 3.11+ (tomllib); found {sys.version.split()[0]} at {sys.executable}"
@@ -1617,6 +1622,14 @@ def describe_catalog_event(event: dict[str, Any]) -> str:
     if kind == "removed":
         return f"{ts} {model_id} removed"
     return f"{ts} {model_id} {kind}"
+
+
+def describe_catalog_event_humanized(event: dict[str, Any]) -> str:
+    text = describe_catalog_event(event)
+    ts = str(event.get("ts", ""))
+    if ts and text.startswith(ts):
+        return humanized_log_date(ts) + text[len(ts) :]
+    return text
 
 
 def run_catalog_command(args: argparse.Namespace) -> int:
@@ -4379,6 +4392,680 @@ def default_model_notes_path() -> Path:
     return Path(__file__).resolve().parent / "docs" / "MODEL-NOTES.md"
 
 
+def default_model_registry_path() -> Path:
+    return Path(__file__).resolve().parent / "registry" / "model-identity.toml"
+
+
+def default_read_model_db_path() -> Path:
+    return ringer_home() / "ringer.db"
+
+
+@dataclass(frozen=True)
+class ModelIdentity:
+    model_display: str
+    harness: str
+    access: str
+    confidence: str = ""
+    source: str = ""
+
+
+@dataclass(frozen=True)
+class ModelIdentityRegistry:
+    identities: dict[tuple[str, str], ModelIdentity]
+    defaults: dict[str, str]
+    engine_meta: dict[str, ModelIdentity]
+
+    def resolve(self, engine: str, model_key: str) -> ModelIdentity:
+        engine_key = model_log_text(engine)
+        raw_model_key = model_log_text(model_key)
+        lookup_key = raw_model_key or self.defaults.get(engine_key, "")
+        identity = self.identities.get((engine_key, lookup_key))
+        if identity is not None:
+            return identity
+        meta = self.engine_meta.get(engine_key)
+        if engine_key == "opencode" and raw_model_key.startswith("openrouter/"):
+            return ModelIdentity(
+                model_display=raw_model_key.removeprefix("openrouter/"),
+                harness=(meta.harness if meta else "OpenCode"),
+                access=(meta.access if meta else "OpenRouter API"),
+                confidence="fallback",
+                source="unlisted OpenRouter slug",
+            )
+        if meta is not None and lookup_key:
+            return ModelIdentity(
+                model_display=lookup_key,
+                harness=meta.harness,
+                access=meta.access,
+                confidence="fallback",
+                source="engine default model key",
+            )
+        unknown = engine_key or "unknown"
+        return ModelIdentity(
+            model_display=unknown,
+            harness=unknown,
+            access="unknown",
+            confidence="unknown",
+            source="",
+        )
+
+
+EMPTY_MODEL_IDENTITY_REGISTRY = ModelIdentityRegistry({}, {}, {})
+
+
+def load_model_identity_registry(path: Path | None = None) -> ModelIdentityRegistry:
+    registry_path = (path or default_model_registry_path()).expanduser().resolve()
+    try:
+        with registry_path.open("rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError):
+        return EMPTY_MODEL_IDENTITY_REGISTRY
+    engines_raw = data.get("engines", {})
+    if not isinstance(engines_raw, dict):
+        return EMPTY_MODEL_IDENTITY_REGISTRY
+    identities: dict[tuple[str, str], ModelIdentity] = {}
+    defaults: dict[str, str] = {}
+    engine_meta: dict[str, ModelIdentity] = {}
+    for engine_name, raw_engine in engines_raw.items():
+        if not isinstance(raw_engine, dict):
+            continue
+        engine = str(engine_name).strip()
+        if not engine:
+            continue
+        harness = model_log_text(raw_engine.get("harness")) or engine
+        access = model_log_text(raw_engine.get("access")) or "unknown"
+        default_key = model_log_text(raw_engine.get("default_model_key"))
+        if default_key:
+            defaults[engine] = default_key
+        engine_meta[engine] = ModelIdentity(
+            model_display=engine,
+            harness=harness,
+            access=access,
+            confidence="engine",
+            source="",
+        )
+        models_raw = raw_engine.get("models", {})
+        if not isinstance(models_raw, dict):
+            continue
+        for model_key_raw, raw_model in models_raw.items():
+            if not isinstance(raw_model, dict):
+                continue
+            model_key = str(model_key_raw).strip()
+            if not model_key:
+                continue
+            identities[(engine, model_key)] = ModelIdentity(
+                model_display=model_log_text(raw_model.get("display")) or model_key,
+                harness=harness,
+                access=access,
+                confidence=model_log_text(raw_model.get("confidence")),
+                source=model_log_text(raw_model.get("source")),
+            )
+    return ModelIdentityRegistry(identities, defaults, engine_meta)
+
+
+def model_log_row_engine(row: dict[str, Any]) -> str:
+    return model_log_text(row.get("worker_engine") if "worker_engine" in row else row.get("engine"))
+
+
+def row_identity_fields(row: dict[str, Any], registry: ModelIdentityRegistry) -> dict[str, str]:
+    identity = registry.resolve(model_log_row_engine(row), model_log_text(row.get("model")))
+    return {
+        "model_display": identity.model_display,
+        "harness": identity.harness,
+        "access": identity.access,
+    }
+
+
+def task_final_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    finals: list[dict[str, Any]] = []
+    for task_rows in group_model_log_tasks(rows):
+        ordered = sorted(
+            task_rows,
+            key=lambda row: (
+                model_log_text(row.get("logged_at")),
+                1 if model_log_row_is_retry(row) else 0,
+            ),
+        )
+        if ordered:
+            finals.append(ordered[-1])
+    return finals
+
+
+def enrich_model_groups_with_identity(
+    groups: list[dict[str, Any]],
+    rows: list[dict[str, Any]],
+    registry: ModelIdentityRegistry,
+    *,
+    include_task_type: bool,
+) -> list[dict[str, Any]]:
+    identity_rows: dict[tuple[str, str] | tuple[str], dict[str, str]] = {}
+    latest: dict[tuple[str, str] | tuple[str], str] = {}
+    for row in task_final_rows(rows):
+        group_model = model_log_row_model(row)
+        group_task_type = model_log_row_task_type(row)
+        key: tuple[str, str] | tuple[str]
+        key = (group_model, group_task_type) if include_task_type else (group_model,)
+        logged_at = model_log_text(row.get("logged_at"))
+        if key not in latest or logged_at >= latest[key]:
+            latest[key] = logged_at
+            identity_rows[key] = row_identity_fields(row, registry)
+    enriched: list[dict[str, Any]] = []
+    for group in groups:
+        key = (
+            (str(group.get("model") or ""), str(group.get("task_type") or ""))
+            if include_task_type
+            else (str(group.get("model") or ""),)
+        )
+        item = dict(group)
+        item.update(
+            identity_rows.get(
+                key,
+                {
+                    "model_display": str(group.get("model") or ""),
+                    "harness": "unknown",
+                    "access": "unknown",
+                },
+            )
+        )
+        enriched.append(item)
+    return enriched
+
+
+def ensure_sqlite_available() -> Any:
+    if sqlite3 is None:
+        raise RuntimeError("sqlite3 is unavailable")
+    return sqlite3
+
+
+def connect_read_model_db(path: Path) -> Any:
+    sqlite = ensure_sqlite_available()
+    path = path.expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite.connect(str(path))
+    conn.row_factory = sqlite.Row
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
+def create_read_model_schema(conn: Any) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS schema_version (
+            version INTEGER NOT NULL
+        );
+        DELETE FROM schema_version;
+        INSERT INTO schema_version(version) VALUES (1);
+        PRAGMA user_version = 1;
+
+        CREATE TABLE IF NOT EXISTS attempts (
+            id INTEGER PRIMARY KEY,
+            run_id TEXT,
+            task_key TEXT,
+            logged_at TEXT,
+            engine TEXT,
+            model TEXT,
+            task_type TEXT,
+            retry INTEGER,
+            verdict TEXT,
+            duration_ms INTEGER,
+            worker_tokens INTEGER,
+            orchestrator TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_attempts_model_task_type
+            ON attempts(model, task_type);
+        CREATE INDEX IF NOT EXISTS idx_attempts_logged_at
+            ON attempts(logged_at);
+
+        CREATE TABLE IF NOT EXISTS catalog_models (
+            id TEXT PRIMARY KEY,
+            name TEXT,
+            context_length INTEGER,
+            prompt_per_m REAL,
+            completion_per_m REAL,
+            free INTEGER,
+            variable_pricing INTEGER,
+            pricing_unknown INTEGER,
+            fetched_at TEXT,
+            modality TEXT
+        );
+        CREATE TABLE IF NOT EXISTS catalog_events (
+            id INTEGER PRIMARY KEY,
+            ts TEXT,
+            kind TEXT,
+            model_id TEXT,
+            payload TEXT
+        );
+        CREATE TABLE IF NOT EXISTS identity (
+            engine TEXT NOT NULL,
+            model_key TEXT NOT NULL,
+            model_display TEXT,
+            harness TEXT,
+            access TEXT,
+            confidence TEXT,
+            source TEXT,
+            PRIMARY KEY (engine, model_key)
+        );
+        CREATE TABLE IF NOT EXISTS identity_defaults (
+            engine TEXT PRIMARY KEY,
+            default_model_key TEXT,
+            harness TEXT,
+            access TEXT
+        );
+        CREATE TABLE IF NOT EXISTS sync_state (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
+        """
+    )
+
+
+def drop_read_model_tables(conn: Any) -> None:
+    conn.executescript(
+        """
+        DROP TABLE IF EXISTS attempts;
+        DROP TABLE IF EXISTS catalog_models;
+        DROP TABLE IF EXISTS catalog_events;
+        DROP TABLE IF EXISTS identity;
+        DROP TABLE IF EXISTS identity_defaults;
+        DROP TABLE IF EXISTS sync_state;
+        DROP TABLE IF EXISTS schema_version;
+        """
+    )
+
+
+def read_log_rows_from_offset(path: Path, offset: int) -> tuple[list[dict[str, Any]], int, int]:
+    rows: list[dict[str, Any]] = []
+    skipped = 0
+    final_offset = offset
+    try:
+        with path.open("rb") as fh:
+            fh.seek(offset)
+            for raw_line in fh:
+                final_offset = fh.tell()
+                try:
+                    line = raw_line.decode("utf-8")
+                    row = json.loads(line)
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    skipped += 1
+                    continue
+                if not isinstance(row, dict):
+                    skipped += 1
+                    continue
+                rows.append(row)
+    except FileNotFoundError:
+        return [], 0, 0
+    return rows, skipped, final_offset
+
+
+def insert_attempt_rows(conn: Any, rows: list[dict[str, Any]]) -> int:
+    payloads: list[tuple[Any, ...]] = []
+    for row in rows:
+        payloads.append(
+            (
+                model_log_text(row.get("run_id")),
+                model_log_text(row.get("task_key")),
+                model_log_text(row.get("logged_at")),
+                model_log_row_engine(row),
+                model_log_text(row.get("model")),
+                model_log_text(row.get("task_type")),
+                1 if model_log_row_is_retry(row) else 0,
+                model_log_text(row.get("verdict")),
+                model_log_int(row.get("duration_ms")),
+                model_log_int(row.get("worker_tokens")),
+                model_log_text(row.get("orchestrator")),
+            )
+        )
+    if payloads:
+        conn.executemany(
+            """
+            INSERT INTO attempts (
+                run_id, task_key, logged_at, engine, model, task_type, retry,
+                verdict, duration_ms, worker_tokens, orchestrator
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            payloads,
+        )
+    return len(payloads)
+
+
+def refresh_catalog_tables(conn: Any, catalog_path: Path) -> None:
+    conn.execute("DELETE FROM catalog_models")
+    try:
+        catalog_models = load_catalog_snapshot(catalog_path)
+    except (OSError, json.JSONDecodeError, ValueError):
+        catalog_models = []
+    payloads: list[tuple[Any, ...]] = []
+    for model in catalog_models:
+        normalized = normalize_catalog_for_scoreboard(model)
+        model_id = model_log_text(normalized.get("id"))
+        if not model_id:
+            continue
+        payloads.append(
+            (
+                model_id,
+                model_log_text(normalized.get("name")),
+                model_log_int(normalized.get("context_length")),
+                normalized.get("prompt_per_m"),
+                normalized.get("completion_per_m"),
+                1 if normalized.get("free") else 0,
+                1 if normalized.get("variable_pricing") else 0,
+                1 if normalized.get("pricing_unknown") else 0,
+                model_log_text(normalized.get("fetched_at")),
+                model_log_text(normalized.get("modality")),
+            )
+        )
+    if payloads:
+        conn.executemany(
+            """
+            INSERT INTO catalog_models (
+                id, name, context_length, prompt_per_m, completion_per_m, free,
+                variable_pricing, pricing_unknown, fetched_at, modality
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            payloads,
+        )
+
+    conn.execute("DELETE FROM catalog_events")
+    event_payloads: list[tuple[Any, ...]] = []
+    for event in read_catalog_events(catalog_changes_path(catalog_path), limit=10_000_000):
+        event_payloads.append(
+            (
+                model_log_text(event.get("ts")),
+                model_log_text(event.get("kind")),
+                model_log_text(event.get("id")),
+                json.dumps(event, sort_keys=True),
+            )
+        )
+    if event_payloads:
+        conn.executemany(
+            "INSERT INTO catalog_events(ts, kind, model_id, payload) VALUES (?, ?, ?, ?)",
+            event_payloads,
+        )
+
+
+def refresh_identity_tables(conn: Any, registry_path: Path) -> None:
+    registry = load_model_identity_registry(registry_path)
+    conn.execute("DELETE FROM identity")
+    conn.execute("DELETE FROM identity_defaults")
+    if registry.identities:
+        conn.executemany(
+            """
+            INSERT INTO identity (
+                engine, model_key, model_display, harness, access, confidence, source
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    engine,
+                    model_key,
+                    identity.model_display,
+                    identity.harness,
+                    identity.access,
+                    identity.confidence,
+                    identity.source,
+                )
+                for (engine, model_key), identity in sorted(registry.identities.items())
+            ],
+        )
+    if registry.engine_meta:
+        conn.executemany(
+            """
+            INSERT INTO identity_defaults(engine, default_model_key, harness, access)
+            VALUES (?, ?, ?, ?)
+            """,
+            [
+                (
+                    engine,
+                    registry.defaults.get(engine, ""),
+                    identity.harness,
+                    identity.access,
+                )
+                for engine, identity in sorted(registry.engine_meta.items())
+            ],
+        )
+
+
+@dataclass(frozen=True)
+class ReadModelSyncResult:
+    db_path: Path
+    log_path: Path
+    attempts_inserted: int
+    skipped: int
+    offset: int
+    rebuilt: bool
+
+
+def rebuild_read_model_db(
+    db_path: Path,
+    log_path: Path,
+    *,
+    catalog_path: Path | None = None,
+    registry_path: Path | None = None,
+) -> ReadModelSyncResult:
+    db_path = db_path.expanduser().resolve()
+    log_path = log_path.expanduser().resolve()
+    catalog_path = (catalog_path or default_catalog_path()).expanduser().resolve()
+    registry_path = (registry_path or default_model_registry_path()).expanduser().resolve()
+    with contextlib.closing(connect_read_model_db(db_path)) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            drop_read_model_tables(conn)
+            create_read_model_schema(conn)
+            rows, skipped, offset = read_log_rows_from_offset(log_path, 0)
+            inserted = insert_attempt_rows(conn, rows)
+            refresh_catalog_tables(conn, catalog_path)
+            refresh_identity_tables(conn, registry_path)
+            conn.execute(
+                "INSERT OR REPLACE INTO sync_state(key, value) VALUES ('log_offset', ?)",
+                (str(offset),),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    return ReadModelSyncResult(db_path, log_path, inserted, skipped, offset, True)
+
+
+def sync_read_model_db(
+    db_path: Path,
+    log_path: Path,
+    *,
+    catalog_path: Path | None = None,
+    registry_path: Path | None = None,
+) -> ReadModelSyncResult:
+    db_path = db_path.expanduser().resolve()
+    log_path = log_path.expanduser().resolve()
+    catalog_path = (catalog_path or default_catalog_path()).expanduser().resolve()
+    registry_path = (registry_path or default_model_registry_path()).expanduser().resolve()
+    try:
+        log_size = log_path.stat().st_size
+    except FileNotFoundError:
+        log_size = 0
+    with contextlib.closing(connect_read_model_db(db_path)) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            create_read_model_schema(conn)
+            row = conn.execute("SELECT value FROM sync_state WHERE key = 'log_offset'").fetchone()
+            offset = int(row["value"]) if row is not None and str(row["value"]).isdigit() else 0
+            if log_size < offset:
+                conn.rollback()
+                return rebuild_read_model_db(
+                    db_path,
+                    log_path,
+                    catalog_path=catalog_path,
+                    registry_path=registry_path,
+                )
+            rows, skipped, new_offset = read_log_rows_from_offset(log_path, offset)
+            inserted = insert_attempt_rows(conn, rows)
+            refresh_catalog_tables(conn, catalog_path)
+            refresh_identity_tables(conn, registry_path)
+            conn.execute(
+                "INSERT OR REPLACE INTO sync_state(key, value) VALUES ('log_offset', ?)",
+                (str(new_offset),),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    return ReadModelSyncResult(db_path, log_path, inserted, skipped, new_offset, False)
+
+
+def load_identity_registry_from_db(conn: Any) -> ModelIdentityRegistry:
+    create_read_model_schema(conn)
+    identities: dict[tuple[str, str], ModelIdentity] = {}
+    defaults: dict[str, str] = {}
+    engine_meta: dict[str, ModelIdentity] = {}
+    for row in conn.execute("SELECT * FROM identity"):
+        engine = model_log_text(row["engine"])
+        model_key = model_log_text(row["model_key"])
+        if not engine or not model_key:
+            continue
+        identities[(engine, model_key)] = ModelIdentity(
+            model_display=model_log_text(row["model_display"]) or model_key,
+            harness=model_log_text(row["harness"]) or engine,
+            access=model_log_text(row["access"]) or "unknown",
+            confidence=model_log_text(row["confidence"]),
+            source=model_log_text(row["source"]),
+        )
+    for row in conn.execute("SELECT * FROM identity_defaults"):
+        engine = model_log_text(row["engine"])
+        if not engine:
+            continue
+        defaults[engine] = model_log_text(row["default_model_key"])
+        engine_meta[engine] = ModelIdentity(
+            model_display=engine,
+            harness=model_log_text(row["harness"]) or engine,
+            access=model_log_text(row["access"]) or "unknown",
+            confidence="engine",
+            source="",
+        )
+    return ModelIdentityRegistry(identities, defaults, engine_meta)
+
+
+def db_attempt_rows(
+    db_path: Path,
+    *,
+    since: str | None = None,
+    engine: str | None = None,
+) -> tuple[list[dict[str, Any]], ModelIdentityRegistry]:
+    with contextlib.closing(connect_read_model_db(db_path)) as conn:
+        create_read_model_schema(conn)
+        query = """
+            SELECT run_id, task_key, logged_at, engine, model, task_type, retry,
+                   verdict, duration_ms, worker_tokens, orchestrator
+            FROM attempts
+        """
+        params: list[Any] = []
+        if engine is not None:
+            query += " WHERE engine = ?"
+            params.append(engine)
+        query += " ORDER BY id"
+        rows = [
+            {
+                "run_id": row["run_id"],
+                "task_key": row["task_key"],
+                "logged_at": row["logged_at"],
+                "worker_engine": row["engine"],
+                "model": row["model"],
+                "task_type": row["task_type"],
+                "retry": bool(row["retry"]),
+                "verdict": row["verdict"],
+                "duration_ms": row["duration_ms"],
+                "worker_tokens": row["worker_tokens"],
+                "orchestrator": row["orchestrator"],
+            }
+            for row in conn.execute(query, params)
+        ]
+        registry = load_identity_registry_from_db(conn)
+        conn.commit()
+    if since is not None:
+        selected_row_ids: set[int] = set()
+        for task_rows in group_model_log_tasks(rows):
+            ordered = sorted(
+                task_rows,
+                key=lambda row: (
+                    model_log_text(row.get("logged_at")),
+                    1 if model_log_row_is_retry(row) else 0,
+                ),
+            )
+            final_date = parse_log_date(ordered[-1].get("logged_at"))
+            if final_date and final_date >= since:
+                selected_row_ids.update(id(row) for row in task_rows)
+        rows = [row for row in rows if id(row) in selected_row_ids]
+    return rows, registry
+
+
+def db_catalog_models(db_path: Path) -> list[dict[str, Any]]:
+    with contextlib.closing(connect_read_model_db(db_path)) as conn:
+        create_read_model_schema(conn)
+        rows = [
+            {
+                "id": row["id"],
+                "name": row["name"],
+                "context_length": row["context_length"],
+                "prompt_per_m": row["prompt_per_m"],
+                "completion_per_m": row["completion_per_m"],
+                "free": bool(row["free"]),
+                "variable_pricing": bool(row["variable_pricing"]),
+                "pricing_unknown": bool(row["pricing_unknown"]),
+                "fetched_at": row["fetched_at"],
+                "modality": row["modality"],
+            }
+            for row in conn.execute("SELECT * FROM catalog_models ORDER BY id")
+        ]
+        conn.commit()
+        return rows
+
+
+def db_catalog_events(db_path: Path, *, limit: int = 20) -> list[dict[str, Any]]:
+    with contextlib.closing(connect_read_model_db(db_path)) as conn:
+        create_read_model_schema(conn)
+        rows = conn.execute(
+            "SELECT payload FROM catalog_events ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        conn.commit()
+    events: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            event = json.loads(row["payload"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def run_db_command(config: AppConfig, args: argparse.Namespace) -> int:
+    db_path = (args.db or default_read_model_db_path()).expanduser().resolve()
+    log_path = (args.log or config.eval.jsonl_path).expanduser().resolve()
+    catalog_path = (getattr(args, "catalog_file", None) or default_catalog_path()).expanduser().resolve()
+    registry_path = (getattr(args, "registry", None) or default_model_registry_path()).expanduser().resolve()
+    if args.db_command == "rebuild":
+        result = rebuild_read_model_db(
+            db_path,
+            log_path,
+            catalog_path=catalog_path,
+            registry_path=registry_path,
+        )
+    else:
+        result = sync_read_model_db(
+            db_path,
+            log_path,
+            catalog_path=catalog_path,
+            registry_path=registry_path,
+        )
+    action = "rebuild" if result.rebuilt else "sync"
+    print(
+        f"db {action}: {result.db_path} "
+        f"attempts={result.attempts_inserted} skipped={result.skipped} offset={result.offset}"
+    )
+    return 0
+
+
 def normalize_notes_match_text(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip().lower()
 
@@ -4458,7 +5145,11 @@ def render_notes_list(items: list[str]) -> str:
         return '<p class="empty-note">no judgment notes yet</p>'
     rendered = []
     for item in items:
-        text = "<br>".join(html_escape(line) for line in item.splitlines() if line.strip())
+        text = "<br>".join(
+            html_escape(humanize_dates_in_text(line))
+            for line in item.splitlines()
+            if line.strip()
+        )
         rendered.append(f"<li>{text}</li>")
     return f'<ul class="notes-list">{"".join(rendered)}</ul>'
 
@@ -4665,6 +5356,35 @@ def fmt_task_cost(value: float | None) -> str:
     return f"${value:.2f}/task"
 
 
+def humanized_log_date(value: Any, *, prefix: str = "") -> str:
+    text = model_log_text(value)
+    if not text:
+        return f"{prefix}unknown" if prefix else "unknown"
+    candidate = text[:10]
+    try:
+        dt = datetime.strptime(candidate, "%Y-%m-%d")
+    except ValueError:
+        return f"{prefix}{text}" if prefix else text
+    rendered = f"{dt.strftime('%B')} {dt.day}, {dt.year}"
+    return f"{prefix}{rendered}" if prefix else rendered
+
+
+def humanize_dates_in_text(value: str) -> str:
+    return re.sub(
+        r"\b\d{4}-\d{2}-\d{2}\b",
+        lambda match: humanized_log_date(match.group(0)),
+        value,
+    )
+
+
+def source_file_link(path: Path, label: str) -> str:
+    resolved = path.expanduser().resolve()
+    return (
+        f'<a class="source-link" href="{html_escape(file_href(resolved))}" '
+        f'title="{html_escape(str(resolved))}">{html_escape(label)}</a>'
+    )
+
+
 def catalog_cost_html(row: dict[str, Any], catalog_model: dict[str, Any] | None) -> str:
     median_tokens = row.get("median_tokens")
     if catalog_model is None:
@@ -4746,6 +5466,8 @@ MODEL_SCOREBOARD_CSS = """
   }
   .source-box b { display: block; font-size: 12px; color: var(--muted); }
   .source-box span { display: block; overflow-wrap: anywhere; }
+  .source-link { color: var(--accent); text-decoration: none; }
+  .source-link:hover { text-decoration: underline; }
   .watchlist {
     border-top: 1px solid var(--hairline);
     border-bottom: 1px solid var(--hairline);
@@ -4793,6 +5515,18 @@ MODEL_SCOREBOARD_CSS = """
   .rank { font-size: 24px; font-weight: 800; line-height: 1; }
   .tier { color: var(--muted); font-size: 13px; margin-top: 4px; }
   .model-name { font-size: 19px; font-weight: 800; overflow-wrap: anywhere; }
+  .model-id { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; margin-top: 3px; }
+  .identity-grid {
+    display: grid;
+    gap: 6px;
+    font-size: 13px;
+  }
+  .identity-grid b {
+    display: block;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 700;
+  }
   .metric-row {
     display: flex;
     gap: 10px;
@@ -4844,7 +5578,12 @@ MODEL_SCOREBOARD_CSS = """
 """
 
 
-def render_free_watchlist(catalog_models: list[dict[str, Any]], catalog_path: Path) -> str:
+def render_free_watchlist(
+    catalog_models: list[dict[str, Any]],
+    catalog_path: Path,
+    *,
+    events: list[dict[str, Any]] | None = None,
+) -> str:
     normalized = [normalize_catalog_for_scoreboard(model) for model in catalog_models]
     free_models = sorted(
         (model for model in normalized if model.get("free")),
@@ -4857,8 +5596,12 @@ def render_free_watchlist(catalog_models: list[dict[str, Any]], catalog_path: Pa
         )
     else:
         free_items = '<li class="muted">no FREE catalog models in the current snapshot</li>'
-    events = read_catalog_events(catalog_changes_path(catalog_path), limit=6)
-    event_items = "".join(f"<li>{html_escape(describe_catalog_event(event))}</li>" for event in events)
+    if events is None:
+        events = read_catalog_events(catalog_changes_path(catalog_path), limit=6)
+    event_items = "".join(
+        f"<li>{html_escape(describe_catalog_event_humanized(event))}</li>"
+        for event in events[:6]
+    )
     if not event_items:
         event_items = '<li class="muted">no catalog change log found</li>'
     return f"""<section class="watchlist" aria-labelledby="watchlist-heading">
@@ -4878,8 +5621,12 @@ def render_model_card(
     notes_sections: dict[str, list[str]],
 ) -> str:
     model_id = str(row.get("model") or "")
+    model_display = str(row.get("model_display") or model_id)
+    harness = str(row.get("harness") or "unknown")
+    access = str(row.get("access") or "unknown")
     notes = model_judgment_notes(model_id, notes_sections)
     median_tokens = "none" if row.get("median_tokens") is None else fmt_int(row.get("median_tokens"))
+    model_id_line = "" if model_id == model_display else f'<div class="model-id">{html_escape(model_id)}</div>'
     return f"""<article class="model-card" id="model-{html_escape(sanitize_artifact_name(model_id))}">
   <div class="model-summary">
     <div>
@@ -4887,7 +5634,8 @@ def render_model_card(
       <div class="tier">{html_escape(str(row.get("tier") or ""))}</div>
     </div>
     <div>
-      <div class="model-name">{html_escape(model_id)}</div>
+      <div class="model-name">{html_escape(model_display)}</div>
+      {model_id_line}
       <div class="metric-row">
         <span><b>n={fmt_int(row.get("tasks"))}</b> tasks</span>
         <span><b>{fmt_int(row.get("attempts"))}</b> attempts</span>
@@ -4896,11 +5644,15 @@ def render_model_card(
         <span><b>{fmt_percent(row.get("pass_rate"))}</b> pass</span>
       </div>
       <div class="metric-row">
-        <span>last_seen <b>{html_escape(str(row.get("last_seen") or "unknown"))}</b></span>
+        <span><b>{html_escape(humanized_log_date(row.get("last_seen"), prefix="last used: "))}</b></span>
         <span>median worker_tokens <b>{html_escape(median_tokens)}</b></span>
       </div>
     </div>
-    <div>{catalog_cost_html(row, catalog_model)}</div>
+    <div class="identity-grid">
+      <span><b>Harness</b>{html_escape(harness)}</span>
+      <span><b>API-Plan</b>{html_escape(access)}</span>
+      <span><b>Cost</b>{catalog_cost_html(row, catalog_model)}</span>
+    </div>
     <div class="quality">
       <div><b>Best:</b> {html_escape(derived_quality_text(row, best=True))}</div>
       <div><b>Worst:</b> {html_escape(derived_quality_text(row, best=False))}</div>
@@ -4929,6 +5681,7 @@ def render_model_scoreboard_html(
     catalog_models: list[dict[str, Any]],
     notes_path: Path,
     notes_sections: dict[str, list[str]],
+    catalog_events: list[dict[str, Any]] | None = None,
     generated_at: str | None = None,
 ) -> str:
     catalog_by_id = catalog_models_by_id(catalog_models)
@@ -4959,16 +5712,16 @@ def render_model_scoreboard_html(
   <header class="corner">
     <span class="live-dot pass" aria-hidden="true"></span>
     <span class="eyebrow">Ringer &nbsp;·&nbsp; <b>model-scoreboard</b></span>
-    <span class="clock mono">Generated {html_escape(generated)}</span>
+    <span class="clock">Generated {html_escape(humanized_log_date(generated))}</span>
   </header>
   <h1 class="briefing scoreboard-briefing">Model performance scoreboard</h1>
   <section class="source-grid" aria-label="scoreboard sources">
-    <div class="source-box"><b>Log</b><span class="mono">{html_escape(str(log_path))}</span></div>
-    <div class="source-box"><b>Catalog</b><span class="mono">{html_escape(str(catalog_path))}</span></div>
-    <div class="source-box"><b>Notes</b><span class="mono">{html_escape(str(notes_path))}</span></div>
-    <div class="source-box"><b>Rows</b><span>{fmt_int(rows_read)} read · {fmt_int(skipped)} skipped · {fmt_int(len(ordered))} models</span></div>
+    <div class="source-box"><b>Log</b><span>{source_file_link(log_path, "eval log")}</span></div>
+    <div class="source-box"><b>Catalog</b><span>{source_file_link(catalog_path, "catalog")}</span></div>
+    <div class="source-box"><b>Notes</b><span>{source_file_link(notes_path, "model notes")}</span></div>
+    <div class="source-box"><b>Models</b><span>{fmt_int(len(ordered))} ranked</span></div>
   </section>
-  {render_free_watchlist(catalog_models, catalog_path)}
+  {render_free_watchlist(catalog_models, catalog_path, events=catalog_events)}
   <section class="models" aria-labelledby="models-heading">
     <h2 id="models-heading">Ranked models</h2>
     {cards}
@@ -4976,6 +5729,7 @@ def render_model_scoreboard_html(
   <footer>
     <span>Ranking sorts by evidence tier first: proven n>=3, then probation; ties use first-try pass rate, pass rate, then lower estimated cost.</span>
     <span>Cost estimate assumes logged worker_tokens are split 50/50 between prompt and completion tokens, using the catalog $/M in/out blend.</span>
+    <span>{fmt_int(rows_read)} rows read, {fmt_int(skipped)} skipped lines.</span>
   </footer>
 </div>
 </body>
@@ -4995,6 +5749,7 @@ def write_model_scoreboard_html(
     catalog_models: list[dict[str, Any]],
     notes_path: Path,
     notes_sections: dict[str, list[str]],
+    catalog_events: list[dict[str, Any]] | None = None,
 ) -> Path:
     target = path
     if target is None:
@@ -5007,6 +5762,7 @@ def write_model_scoreboard_html(
         skipped=skipped,
         catalog_path=catalog_path,
         catalog_models=catalog_models,
+        catalog_events=catalog_events,
         notes_path=notes_path,
         notes_sections=notes_sections,
     )
@@ -5025,17 +5781,21 @@ def write_model_scoreboard_html(
 def print_model_log_table(path: Path, rows_read: int, skipped: int, groups: list[dict[str, Any]]) -> None:
     print(f"Model log: {path} ({rows_read} rows, {skipped} skipped lines)")
     header = (
-        f"{'task_type':<18} {'model':<32} {'tasks':>5} {'attempts':>8} "
-        f"{'passed':>6} {'failed':>6} {'pass':>6} {'first':>6} "
-        f"{'dur_ms':>8} {'tokens':>8} {'last_seen'}"
+        f"{'task_type':<18} {'model':<32} {'harness':<16} {'tasks':>5} "
+        f"{'attempts':>8} {'passed':>6} {'failed':>6} {'pass':>6} "
+        f"{'first':>6} {'dur_ms':>8} {'tokens':>8} {'last_seen'}"
     )
     print(header)
     print("-" * len(header))
     for group in groups:
         duration = "" if group["median_duration_ms"] is None else str(group["median_duration_ms"])
         tokens = "" if group["median_tokens"] is None else str(group["median_tokens"])
+        display = str(group.get("model_display") or group["model"])
+        if display != group["model"]:
+            display = f"{display} ({group['model']})"
         print(
-            f"{group['task_type']:<18} {shorten(group['model'], 32):<32} "
+            f"{group['task_type']:<18} {shorten(display, 32):<32} "
+            f"{shorten(str(group.get('harness') or 'unknown'), 16):<16} "
             f"{group['tasks']:>5} {group['attempts']:>8} {group['passed']:>6} "
             f"{group['failed']:>6} {group['pass_rate']:>6.2f} "
             f"{group['first_try_pass_rate']:>6.2f} {duration:>8} "
@@ -5047,11 +5807,36 @@ def print_model_log_table(path: Path, rows_read: int, skipped: int, groups: list
 def run_models_command(config: AppConfig, args: argparse.Namespace) -> int:
     log_path = (args.log or config.eval.jsonl_path).expanduser().resolve()
     since = validate_since_date(args.since)
-    rows, skipped = read_model_log_rows(log_path, since=since, engine=args.engine)
-    groups = aggregate_model_log_rows(rows, task_type=args.task_type, model=args.model)
+    db_path = (getattr(args, "db", None) or default_read_model_db_path()).expanduser().resolve()
+    catalog_path = (getattr(args, "catalog_file", None) or default_catalog_path()).expanduser().resolve()
+    registry_path = (getattr(args, "registry", None) or default_model_registry_path()).expanduser().resolve()
+    using_db = True
+    catalog_events: list[dict[str, Any]] | None = None
+    try:
+        sync_result = sync_read_model_db(
+            db_path,
+            log_path,
+            catalog_path=catalog_path,
+            registry_path=registry_path,
+        )
+        rows, identity_registry = db_attempt_rows(db_path, since=since, engine=args.engine)
+        skipped = sync_result.skipped
+        catalog_models_from_db = db_catalog_models(db_path)
+        catalog_events = db_catalog_events(db_path, limit=6)
+    except Exception as exc:
+        using_db = False
+        print(f"models: SQLite read model unavailable; using JSONL fallback ({exc})", file=sys.stderr)
+        rows, skipped = read_model_log_rows(log_path, since=since, engine=args.engine)
+        identity_registry = load_model_identity_registry(registry_path)
+        catalog_models_from_db = []
+    groups = enrich_model_groups_with_identity(
+        aggregate_model_log_rows(rows, task_type=args.task_type, model=args.model),
+        rows,
+        identity_registry,
+        include_task_type=True,
+    )
     if args.explore:
-        catalog_path = (args.catalog_file or default_catalog_path()).expanduser().resolve()
-        catalog_models = load_catalog_snapshot(catalog_path)
+        catalog_models = catalog_models_from_db if using_db else load_catalog_snapshot(catalog_path)
         print_model_explore(
             log_path=log_path,
             rows_read=len(rows),
@@ -5064,10 +5849,14 @@ def run_models_command(config: AppConfig, args: argparse.Namespace) -> int:
     html_arg = getattr(args, "html", None)
     open_requested = bool(getattr(args, "open", False))
     if html_arg is not None or open_requested:
-        catalog_path = (args.catalog_file or default_catalog_path()).expanduser().resolve()
-        catalog_models = load_catalog_snapshot(catalog_path)
+        catalog_models = catalog_models_from_db if using_db else load_catalog_snapshot(catalog_path)
         notes_path = (getattr(args, "notes_file", None) or default_model_notes_path()).expanduser().resolve()
-        scoreboard_rows = aggregate_model_scoreboard_rows(rows, task_type=args.task_type, model=args.model)
+        scoreboard_rows = enrich_model_groups_with_identity(
+            aggregate_model_scoreboard_rows(rows, task_type=args.task_type, model=args.model),
+            rows,
+            identity_registry,
+            include_task_type=False,
+        )
         explicit_path = None
         if html_arg not in {None, ""}:
             explicit_path = Path(str(html_arg))
@@ -5082,6 +5871,7 @@ def run_models_command(config: AppConfig, args: argparse.Namespace) -> int:
             catalog_models=catalog_models,
             notes_path=notes_path,
             notes_sections=parse_model_notes_sections(notes_path),
+            catalog_events=catalog_events,
         )
         print(page_path)
         if open_requested:
@@ -6540,9 +7330,20 @@ def build_parser() -> argparse.ArgumentParser:
     hud_parser.add_argument("--port", type=int, help=f"port to bind on 127.0.0.1 (default: {DEFAULT_HUD_PORT})")
     hud_parser.add_argument("--no-open", action="store_true", help="start the server without opening a browser")
 
+    db_parser = subparsers.add_parser("db", help="manage the derived SQLite read model")
+    db_parser.add_argument("--config", type=Path, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    db_subparsers = db_parser.add_subparsers(dest="db_command", required=True)
+    for name in ("rebuild", "sync"):
+        sub = db_subparsers.add_parser(name, help=f"{name} the derived SQLite read model")
+        sub.add_argument("--db", type=Path, help="path to SQLite read model (default: ~/.ringer/ringer.db)")
+        sub.add_argument("--log", type=Path, help="path to local eval JSONL log")
+        sub.add_argument("--catalog-file", type=Path, help="path to local OpenRouter catalog snapshot")
+        sub.add_argument("--registry", type=Path, help="path to model identity registry")
+
     models_parser = subparsers.add_parser("models", help="show the local per-model performance scoreboard")
     models_parser.add_argument("--config", type=Path, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     models_parser.add_argument("--log", type=Path, help="path to local eval JSONL log")
+    models_parser.add_argument("--db", type=Path, help="path to SQLite read model (default: ~/.ringer/ringer.db)")
     models_parser.add_argument("--task-type", help="only include one task_type bucket")
     models_parser.add_argument("--model", help="only include one resolved model bucket")
     models_parser.add_argument("--engine", help="only include rows from one worker engine")
@@ -6550,6 +7351,7 @@ def build_parser() -> argparse.ArgumentParser:
     models_parser.add_argument("--explore", action="store_true", help="show proven/probation tiers plus cheap untested catalog candidates")
     models_parser.add_argument("--catalog-file", type=Path, help="path to local OpenRouter catalog snapshot")
     models_parser.add_argument("--notes-file", type=Path, default=default_model_notes_path(), help="path to MODEL-NOTES.md judgment layer")
+    models_parser.add_argument("--registry", type=Path, default=default_model_registry_path(), help=argparse.SUPPRESS)
     models_parser.add_argument("--html", nargs="?", const="", help="render a self-contained HTML scoreboard; optional output path")
     models_parser.add_argument("--open", action="store_true", help="render the HTML scoreboard to the artifact library and open it")
     models_parser.add_argument("--json", action="store_true", help="print the scoreboard as JSON")
@@ -6608,6 +7410,8 @@ def main(argv: list[str] | None = None) -> int:
             return run_catalog_command(args)
 
         config = AppConfig.load(args.config)
+        if args.command == "db":
+            return run_db_command(config, args)
         if args.command == "models":
             return run_models_command(config, args)
         if args.command == "hud":

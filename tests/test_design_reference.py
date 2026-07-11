@@ -90,10 +90,15 @@ class DesignReferenceTests(unittest.TestCase):
         self.assertIn('class="live-dot is-live"', html)
         self.assertIn('<div class="rounds"', html)
         self.assertIn('<section class="work"', html)
+        # Work gating (upstream ringside overhaul, merged 2026-07-11): only
+        # finished-and-checked workers get a work-group row on the live page;
+        # in-flight workers surface through the rounds strip instead.
         self.assertIn('<div class="work-group">', html)
         self.assertIn('<div class="worker">', html)
-        self.assertIn('<span class="state retry">sent back — redoing</span>', html)
-        self.assertIn('<span class="activity" title="Reading section 4">Reading section 4</span>', html)
+        self.assertIn('<span class="state pass">finished &amp; checked</span>', html)
+        self.assertIn('aria-label="contract-a: sent back — redoing"', html)
+        self.assertIn('aria-label="contract-b: working"', html)
+        self.assertNotIn('<span class="state retry">', html)
 
     def test_final_page_uses_static_dot(self) -> None:
         html = render_final_report_html(

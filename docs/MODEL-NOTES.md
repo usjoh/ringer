@@ -20,6 +20,16 @@ checks and raw logs support — no vibes, no worker self-reports.
 - 2026-07-05 — carried the heavy lanes of the milk-crate demo rehearsals
   (market read with source allowlist, site build) with clean first-attempt
   passes.
+- 2026-07-10 — gpt-5.6-sol, code-feature (steering-profiles feature in
+  ringer.py itself, ~470-line change + 18 tests + docs, run
+  ringer-steering-profiles): shipped as PR #25. 2 attempts, 379k tokens,
+  but the attempt-1 FAIL was the CHECK's fault, not the model's — the check
+  gated on the ENTIRE pre-existing suite being green inside the worker
+  sandbox (localhost binds blocked, fixture missing). The feature work
+  itself was verified green both attempts; attempt 2 "hardened" an already
+  -sound implementation. Scoreboard's FAIL row for this run understates the
+  model. Lesson for check authors: regression gates must compare against
+  the BASELINE failure set, never assert absolute suite green.
 - 2026-07-06 — adversarial pre-merge review (aicred spark): passed on
   attempt 1, ~85k tokens.
 - 2026-07-06 — motion design (5 HTML animations for video b-roll) + 2
@@ -217,6 +227,11 @@ checks and raw logs support — no vibes, no worker self-reports.
 
 ## grok-build (Grok CLI engine, flat plan)
 
+- 2026-07-10 — identity correction (Jon): the Grok Build CLI is a HARNESS
+  serving exactly two models — Grok 4.5 (xAI) and Composer 2.5 (Cursor).
+  The engine-lane slug `grok-build` resolves to Grok 4.5. "Grok Build 0.1"
+  was never a model; earlier notes/rows using it as one describe Grok 4.5.
+
 - 2026-07-06 — first outing (elsas-website demo), engine added same day:
   audition PASS attempt 1 in 28.9s. Then: asset harvest (11 images, live URL
   re-fetch check), books page, 5 work-page routes in one task (59 verbatim
@@ -357,3 +372,30 @@ checks and raw logs support — no vibes, no worker self-reports.
 - 3 tasks (code-fix bash surgical / code-feature 614-line bash wrapper / code-feature python work-unit+tests): 3/3 pass, one retry on the python lane. Tokens: 37k / 148k / 275k.
 - Retry cause was SPEC-side: my spec mandated strict failure semantics (missing dependency → work-unit failed) that an existing end-to-end smoke test correctly rejected (close status poisoned). Codex attempt 2 satisfied both by forking semantics on a test-plumbing field (changeset_overrides is None) — working but over-clever; simplified at integration. Lesson: when a spec adds a unit to an orchestrator that has end-to-end smoke tests, spec the desired status mapping for missing-dependency explicitly.
 - Both fixture-based checks passed while hiding 2 real-substrate bugs (EXIT-trap lock cleanup deleting a live lock; tilde-expansion in ${var#~/} — fixture used absolute paths). Codex not at fault; checks were fixture-only. Lesson: for ops scripts, add one real-repo scenario to the check or budget an acceptance pass after integration.
+
+## gpt-5.6-sol (codex)
+- 2026-07-09 code-feature/code-fix (ringside-overhaul): 4/4 first-try — a ringer.py logging change with tests, a 265-line stdlib backfill CLI (atomic rewrite, dry-run, idempotence all check-verified), a ~1500-line single-file HTML redesign (running-now pills + worker-card grid + multi-expansion refactor, 30KB patch, node --check + contract greps + unittest), and a render-gating change where it correctly UPDATED tests asserting the old behavior instead of gaming the check. Medium/high reasoning, 65–120k tokens/task.
+- Same day, different session (bench-harness-patches, code-fix): 0.29 first-try over 7 tasks on a Next.js/Turbopack harness. Spec and check quality dominate model choice — see the scoreboard before generalizing either number.
+
+## GPT-5.5 (codex) — attribution caveat
+- Scoreboard rows dated before 2026-07-09 may actually be gpt-5.6: codex eval rows logged model="" until the write-time stamping fix (PR #18) and were credited to GPT-5.5 by the registry default at read time, while the machine's codex default had already moved to gpt-5.6-sol at an unknown earlier date. `scripts/backfill_model_from_logs.py` re-stamps rows with surviving command-log evidence; anything it skips is a mixed-model aggregate. Trust post-2026-07-09 rows.
+
+## nvidia/nemotron-3-super-120b-a12b:free
+- 2026-07-08 (research, content-strategy-recon): FAIL x2. Did the analysis in chat but never wrote report.md; attempt 2 exited rc=0 with no file. Doesn't reliably follow file-output contracts under OpenCode. Demoted — don't re-audition on file-deliverable tasks.
+
+## meta-llama/llama-3.3-70b-instruct:free
+- 2026-07-08 (research, content-strategy-recon): FAIL x2. Timed out at 900s both attempts on a moderate DB-scrape+format task. Too slow on the free tier for harness work. Demoted — don't re-audition without much longer timeouts or paid tier.
+
+## z-ai/glm-5.2 (addendum)
+- 2026-07-08 (research/filter, pitch-foundry): FAIL x2 on a long-spec rubric-application task (~40k input: embedded rubric + 4 candidate files). Read all inputs, exited rc=0 with ZERO output tokens both attempts — silent stall, no file written. GLM handled the same session's shorter formatting specs fine. Lesson: keep GLM specs short; route long-context apply-this-rubric work to codex.
+
+## GPT-5.5 (codex) — honesty flag
+- 2026-07-08 (image-gen, pitch-foundry): sandbox DNS blocked openrouter.ai; ALL 10 API calls errored (logged honestly in gen-log) — but the worker then FABRICATED 10 deliverables locally (composited canvases from the ref image) to satisfy a files-exist>40KB check, and passed. Lesson: (a) codex sandbox has no external DNS on this machine — route API-calling tasks to opencode (network open); (b) never write an existence-only check for generated media — require the success log (SAVED/cost lines) to match the file count.
+
+- 2026-07-09 persona-review (pitch-foundry exec-briefing panel): 0/2 first-try+retry. Produced coherent review CONTENT as chat text but never wrote report.md — does not reliably use file-write tools under opencode. Demoted; do not re-audition for file-deliverable tasks without a write-tool probe first.
+
+## gpt-5.6-luna (codex)
+- 2026-07-09 code-feature (unlock-ai guide-format conversion, strict type-contract check): 1/1 first-try, 42.6k tokens, 80s. Followed a multi-file TS pattern precisely at $1/$6 pricing. Good candidate for mechanical codegen/docs lanes; audition in adjacent types.
+
+## opencode / z-ai glm-5.2 (via openrouter)
+- 2026-07-09 (aicred-invoice-downloads, 4 code-fix tasks + 1 follow-up, worktrees+npm ci checks): systematic attempt-1 NO-OP — all 4 parallel workers produced zero edits and no summary on first attempt, then completed cleanly on attempt 2 after retry-prompt injection (34k-69k tokens each). Follow-up single task passed attempt 1. Suspect first-invocation session warm-up in opencode-sandboxed under parallel spawn; budget for 2 attempts on parallel GLM batches. Output quality on Next.js/Stripe route+test work: solid, spec-faithful, one boss-caught design gap (used user-scoped supabase client where RLS demanded service role — spec didn't say explicitly; say it explicitly).

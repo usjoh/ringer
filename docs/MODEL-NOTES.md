@@ -433,3 +433,54 @@ checks and raw logs support — no vibes, no worker self-reports.
 - **codex (reasoning=medium):** pass attempt 1, 134.2s, 39.3k tokens — 5 of 6 owned files, ~111 lines, still first-try. Held the brief's central distinction under its own steam: Python maps BOTH `EPERM` (sandbox forbids binding; another port won't help) and `EACCES` (privileged port; another port WOULD help) to `PermissionError`, so the fix had to branch on `exc.errno`, not on the exception type. It branched correctly and wrote the EACCES test that pins it. Also honoured the narrow-skip constraint exactly — every one of the 7 skips catches `BindNotPermittedError` only, never a bare `RuntimeError` or a string match. Correctly refused to claim the unsandboxed zero-skip result it could not observe from inside its own sandbox, reporting what it actually saw (197 OK, 7 skips) — third run running of accurate self-reporting under environment limits; this worker does not inflate.
 - **Lesson retired by this run:** the standing "regression gates must compare against the BASELINE failure set, never assert absolute suite green" advice (from the 2026-07-10 steering-profiles false-FAIL) no longer applies to this repo's suite. The failure set is gone — the 7 socket-bind tests now SKIP on `BindNotPermittedError` instead of erroring, so a sandboxed worker sees `OK (skipped=7)` and can self-verify honestly. Checks can once again assert plain green; the honest-bind-errors check asserts a bare `OK` line specifically so an unsandboxed run that skips anything FAILS. Keep the baseline-diff advice in mind for OTHER repos (meridian's suite still has hermeticity issues) — just don't apply it here.
 - **Orchestrator method note:** reproducing the workers' reported errors with `sandbox-exec -p '(version 1)(allow default)(deny network*)' python3 -m unittest discover -s tests -t tests` is what turned "7 flaky tests" into a real product bug. Three runs of workers dutifully reporting "7 socket-binding errors, environment limit" and nobody reading the message they were reporting — which said `that port is already in use` while the traceback said `Operation not permitted`. Reproduce the environment before believing the category.
+
+## run maam-successor-doc-pack, 2026-07-15 (docs/code-review: 8-lane doc-vs-code ground-truth audit of a client system's handoff documentation)
+
+Result: 8/8 lanes produced valid, quote-verified findings — 61 findings, 52 unverifiable,
+12 clean. Check design: every cited quote (doc side AND evidence side) is grepped back to
+the file the worker named, so a fabricated finding fails instead of shipping.
+
+- **gpt-5.6-sol (codex, high/medium effort):** 3/3 first-try (schema-enums, workflows,
+  architecture-core). The high-effort schema lane spent 158k tokens and returned the richest
+  result of the run — 14 findings, all verified, including four the orchestrator had not
+  seeded as leads. High effort earned its cost on the dense schema/enum lane; medium was
+  sufficient for the workflow lane.
+- **glm-5.2 (opencode):** 4/4 pass, 2/4 first-try. prose-intelligence and architecture-aux
+  needed the retry; prose-troubleshooting and prose-sops passed attempt 1. Notably BETTER
+  than the previously recorded systematic attempt-1 no-op under parallel spawn (2026-07-09,
+  0/4) — the warm-up failure is real but not universal. Still budget 2 attempts. Output
+  quality on doc-vs-code work was genuinely good: architecture-aux independently discovered a
+  whole second analytics path the orchestrator did not know existed.
+- **gpt-5.6-luna (codex, medium effort) — AUDITION PASSED ON SUBSTANCE; the scoreboard's
+  FAIL row for luna/docs is SPURIOUS — do not demote on it.** The run logged FAIL 2/2. The
+  cause was a CHECK DEFECT, not the model: the validator read every cited file as UTF-8 text,
+  and luna had cited a verbatim quote from a .docx (a zip). The quote was real. After teaching
+  the validator to extract docx text, luna's UNCHANGED output re-validated clean: 7 findings,
+  3 unverifiable, 1 clean, every quote verified present. luna went to the trouble of
+  extracting text from a binary Word file in order to cite it properly rather than
+  paraphrasing — that is the opposite of the failure mode the check exists to catch. It also
+  produced the run's most valuable single finding (a documented privacy boundary that the
+  live code contradicts). Adjacent-type audition (code-feature -> docs) succeeded; luna is a
+  reasonable docs-lane pick.
+- **Lesson for check authors:** a check that cannot READ an artifact type behaves identically
+  to a check catching a liar. Both print "quote not found." If a lane can cite binary or
+  non-plaintext sources (.docx, .pdf, .xlsx), the extractor must handle them or the check
+  will punish exactly the workers who did the extra work. The fixed validator now warns
+  loudly on an unparseable file rather than silently failing the worker.
+
+### Ringer mechanics note (not a model note) — FIXED 2026-07-15
+The codex engine block had no `{model}` placeholder in its args_template. Consequence:
+ringer.py's validator (line ~8320) *correctly and loudly* rejects any codex task that sets
+`"model"` ("would be silently ignored") — so the sanctioned mechanism was unusable for codex,
+leaving `engine_args: ["-m", ...]` as the only way to pin a codex model, which is precisely
+what SKILL.md forbids. Not a silent-attribution bug (an earlier draft of this note claimed
+that; it was wrong — the guard raises, nothing silent happens). It was a dead end: no
+sanctioned way to pin a codex model at all.
+
+FIX APPLIED to ~/.config/ringer/config.toml: threaded `-m {model}` into the codex
+args_template and set `model_default = "gpt-5.6-sol"` (mirrors ~/.codex/config.toml).
+Dry-run verified: a codex task with no model field composes `-m gpt-5.6-sol`; a task with
+`"model": "gpt-5.6-luna"` composes `-m gpt-5.6-luna`. The `model` field now behaves for codex
+exactly as it does for opencode, and SKILL.md's "never splice -m through engine_args" rule is
+now simply true everywhere — no exception needed. This run (maam-successor-doc-pack) predates
+the fix and used the engine_args splice; later runs should use the `model` field.

@@ -1382,8 +1382,12 @@
         const leftLive = left.state === "live" ? 1 : 0;
         const rightLive = right.state === "live" ? 1 : 0;
         if (leftLive !== rightLive) return rightLive - leftLive;
-        // Stable within each group: two live runs must never swap rows as
-        // their "updated Ns ago" leapfrogs every flush (demo-night lesson).
+        // Live rows stay name-ordered: their updatedTs bumps on every flush,
+        // so time order would leapfrog rows mid-review (demo-night lesson).
+        if (leftLive) return left.name.localeCompare(right.name);
+        // Finished rows: newest first. Their updated_at is the finish stamp
+        // and no longer moves, so recency order is stable here.
+        if (left.updatedTs !== right.updatedTs) return right.updatedTs - left.updatedTs;
         return left.name.localeCompare(right.name);
       });
     }
@@ -1475,9 +1479,12 @@
       } else {
         options = state.artifacts.map(artifact => {
           const marker = artifact.state === "live" ? "● " : "";
+          // Callers can only tell same-named runs apart by who started them,
+          // so surface the calling session identity right in the row.
+          const identity = artifact.identity && artifact.identity !== "unknown" ? ` · ${artifact.identity}` : "";
           return {
             value: artifact.name,
-            text: `${marker}${artifact.name} — ${artifact.state === "live" ? "live" : artifact.state} · updated ${relativeAgo(artifact.updated_at)}`
+            text: `${marker}${artifact.name} — ${artifact.state === "live" ? "live" : artifact.state}${identity} · updated ${relativeAgo(artifact.updated_at)}`
           };
         });
       }

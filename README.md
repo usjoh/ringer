@@ -1,5 +1,7 @@
 # Ringer
 
+[![tests](https://github.com/NateBJones-Projects/ringer/actions/workflows/tests.yml/badge.svg)](https://github.com/NateBJones-Projects/ringer/actions/workflows/tests.yml)
+
 ![Ringer — she reviews; the wall works](docs/hero.png)
 
 **Parallel AI-agent swarms that prove their work. Your expensive model plans and reviews; cheap workers do the typing.**
@@ -121,6 +123,16 @@ lint: clean (1 tasks)
 `run` and `demo` also print any lint findings as non-blocking warnings after the manifest loads. They teach at the moment of use; they do not stop a run.
 
 A check that cannot fail is trusting the worker with extra steps.
+
+### Baseline: prove your checks before spending tokens
+
+Lint reads the manifest; `--baseline` executes it — every task's `check` runs against the unmodified tree, spawning no workers and writing no eval rows:
+
+```bash
+./ringer.py run swarm.json --baseline
+```
+
+Each check runs in a fresh scratch dir (a detached worktree when the manifest uses worktrees) through the same verifier as a real run. Reading the results: an assertion that demands the NEW behavior workers will build is *expected* to FAIL baseline; an assertion about UNCHANGED behavior that fails baseline is a bug in the check itself, and at run time it would burn a worker's attempts against something no model can satisfy. Fix the check before spawning.
 
 ## Make your agent actually use this
 
@@ -255,7 +267,7 @@ Every worker attempt — pass, fail, timeout, retry — is logged with its spec,
 
 ### Model identity taxonomy
 
-The scoreboard keeps the trained model, its lab, the invoking harness, the access plan, and any explicit reasoning effort as separate fields. Reserved test names never render, and historical rows without a stamped model are quarantined instead of being credited to an engine default. See the normative [model identity taxonomy](docs/TAXONOMY.md).
+The scoreboard keeps the trained model, its lab, the invoking harness, the access plan, and any explicit reasoning effort as separate fields. Reserved test names never render, and historical rows without a stamped model are quarantined instead of being credited to an engine default. Models with a declared canonical access route are enforced at lint and run time — a manifest that reaches a model through a non-sanctioned harness/slug is refused unless you pass `--allow-noncanonical-route`, and historical rows from such routes display as `misrouted` and are never ranked. See the normative [model identity taxonomy](docs/TAXONOMY.md).
 
 Every task attempt is logged **automatically and locally** to `~/.ringer/runs.jsonl` — no setup, no account, nothing leaves your machine. Each row carries the per-attempt verdict straight from the EXECUTED check, plus duration, tokens, the resolved `model`, the task's `task_type` (if the manifest set one), and the `retry` number.
 
@@ -339,12 +351,14 @@ Four rules are baked into every worker invocation. They all cost us real debuggi
 
 ## Contributors
 
-Community PRs that made it into main — thank you:
+Every community PR that lands in main is credited here — that's a project rule, enforced by a test. Thank you:
 
-- [@oceanonline](https://github.com/oceanonline) — portable `python3` in template checks + lint quickstart path (#24)
-- [@davekopecek](https://github.com/davekopecek) — committed design-reference fixture so the design-token guard runs everywhere (#30)
+- [@oceanonline](https://github.com/oceanonline) — portable `python3` in template checks + lint quickstart path fix (#24)
+- [@davekopecek](https://github.com/davekopecek) (Dave Kopecek) — committed the design-reference fixture so the design-token guard runs on every machine (#30)
+- [@snapsynapse](https://github.com/snapsynapse) (Sam Rogers) — graceful shutdown on SIGINT/SIGTERM with worker-tree cleanup and finished state, plus the 14-test end-to-end CLI regression suite (#4)
+- [@mlava](https://github.com/mlava) (Mark Lavercombe) — named setup failures across every diagnostic surface (#37) and `run --baseline`, the no-workers check preflight (#38)
 
-Contributions are welcome. Small and scoped merges fastest; PRs keep their author's name on the commit.
+Contributions are welcome. What gets a PR merged fast here: small and scoped, rebased on current main, every claim backed by an executed test. Authorship is always preserved — where a maintainer pushes a mechanical fix to your branch, you remain the commit author.
 
 ## License
 

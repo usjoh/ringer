@@ -98,6 +98,16 @@ checks and raw logs support — no vibes, no worker self-reports.
   contract-pinning test the checks couldn't see. Derive check suite scope
   from the target repo's own gate config, not from precedent check scripts.
 
+- 2026-07-17 — run observer-triad-port (sextant): code-review high (wrapper
+  adversarial review) passed attempt 1, executed its own refutation
+  experiments (closure tracing, argv fuzzing, stubbed-validator selftest
+  bypass) and caught a HIGH design-level cross-system bleed the author
+  missed — worth the token premium on control-plane review. code-fix medium
+  (same run, worktree) needed attempt 2: skipped one required selftest
+  addition on the first pass; the check's named failure line drove a clean
+  retry. Spec listed 4 findings — next time put a numbered acceptance
+  checklist at the TOP of fix specs with multiple sub-fixes.
+
 ## glm-5.2 via opencode (`openrouter/z-ai/glm-5.2`)
 
 - The cheap-intelligence default (~$0.74/M in, $2.33/M out, 2026-07 —
@@ -162,6 +172,25 @@ checks and raw logs support — no vibes, no worker self-reports.
   contention findings (full catalog re-ingest per sync; schema writes on
   read paths) plus an empirical XSS all-clear on the new DOM surfaces.
   Third proven-tier structured review today.
+
+- 2026-07-17 — run observer-triad-port (sextant), probe: first probe-type
+  pass on this box (prior probe rows were codex 0/4 timeout-shaped). Ran a
+  9-step dual-interpreter CLI smoke first-try, captured full transcripts,
+  and self-repaired its runner script when process-substitution tee was
+  sandbox-blocked. Good default for deterministic script probes with an
+  executed check.
+- 2026-07-18 — retrieval-daemon-overnight-check (meridian), probe: the run's
+  recorded FAIL (2 attempts) was an ORCHESTRATOR manifest bug, not the model —
+  the spec's output redirects + check targeted the workdir ROOT, which the
+  worker process is TCC-blocked from writing (com.apple.provenance xattr on
+  the scratchpad parent; only the task subdir is writable). The probed
+  behavior itself passed and the worker was exemplary: ran the exact nested
+  claude -p, validated honestly, documented the write-blocker with evidence
+  instead of faking placement, wrote all artifacts to the writable task
+  subdir. Orchestrator-verified PASS against the real transcript. Lesson for
+  manifests: point worker outputs and checks INSIDE the task subdir
+  (workdir/<task-key>/), never at the workdir root. Do not count this run's
+  scoreboard FAIL against glm's probe record.
 
 ## kimi-k2.7 via opencode (`openrouter/moonshotai/kimi-k2.7-code`)
 
@@ -484,3 +513,33 @@ Dry-run verified: a codex task with no model field composes `-m gpt-5.6-sol`; a 
 exactly as it does for opencode, and SKILL.md's "never splice -m through engine_args" rule is
 now simply true everywhere — no exception needed. This run (maam-successor-doc-pack) predates
 the fix and used the engine_args splice; later runs should use the `model` field.
+
+## nvidia/nemotron-3-nano-30b-a3b:free (via opencode)
+- 2026-07-17 (docs, maam-doc-trust-banners exploration seat): PASSED the executed
+  check on attempt 2 but REJECTED at orchestrator review — the check caught form,
+  not quality. Banners were degenerate copy-paste: the same wrong description
+  ("initial treatment start process") stamped on all four docs incl. swap/stocking/
+  resupply, whole sections duplicated, triple-nested blockquotes, one factual
+  drift ("zero AR errors" for zero INVOICE-class errors), and a stray bare
+  `new-content` line INSERTED INTO YAML FRONTMATTER (additions-only diff check
+  can't see that class of damage). Lane redone on GLM. Don't re-audition on
+  client-facing prose; if it gets another slot, pure-mechanical single-file edits
+  only. Sibling verdicts (super-120B demoted twice) now extend family-wide for
+  structured prose.
+
+## run maam-doc-trust-banners, 2026-07-17 (docs: tag-only TRUST banners across 21 handoff docs, worktrees + additions-only patch checks)
+- **gpt-5.6-sol (codex, medium effort): 2/2 first-try** (schema-rules, meta-arch — the
+  two judgment-heavy lanes). Banners cited the docs' own rule IDs (RULE CV-02/RD-01)
+  and got the successor-inheritance + mobile-analytics warnings exactly right. Medium
+  effort was sufficient; don't pay high for banner-authoring.
+- **glm-5.2 (opencode): 3/3 first-try + the round-2 redo lane** — no parallel-spawn
+  warm-up no-op this run. Quality above spec: doc 11's banner added two real
+  undocumented-live-fields the spec didn't ask for (CreatedAt, Notes/Description
+  fallback), correctly labeled. GLM is the default lane for tag/banner sweeps.
+- **Check-craft lessons (validator upgraded mid-run):** (1) substance regexes must
+  match the BANNER's own lines, not a text window that includes doc body — nemotron's
+  PK_SWAP banner passed a /v2.1/ requirement off the doc's version-history table;
+  (2) additions-only diff checks miss in-frontmatter garbage lines — validate
+  frontmatter line-shape explicitly; (3) two tightened checks initially false-failed
+  honest work ("corrected ON 2026-07-17", a prose cross-reference counted as a
+  duplicated section) — strict-on-substance/tolerant-on-format cuts both ways.

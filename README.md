@@ -1,5 +1,7 @@
 # Ringer
 
+[![tests](https://github.com/NateBJones-Projects/ringer/actions/workflows/tests.yml/badge.svg)](https://github.com/NateBJones-Projects/ringer/actions/workflows/tests.yml)
+
 ![Ringer — she reviews; the wall works](docs/hero.png)
 
 **Parallel AI-agent swarms that prove their work. Your expensive model plans and reviews; cheap workers do the typing.**
@@ -122,6 +124,16 @@ lint: clean (1 tasks)
 
 A check that cannot fail is trusting the worker with extra steps.
 
+### Baseline: prove your checks before spending tokens
+
+Lint reads the manifest; `--baseline` executes it — every task's `check` runs against the unmodified tree, spawning no workers and writing no eval rows:
+
+```bash
+./ringer.py run swarm.json --baseline
+```
+
+Each check runs in a fresh scratch dir (a detached worktree when the manifest uses worktrees) through the same verifier as a real run. Reading the results: an assertion that demands the NEW behavior workers will build is *expected* to FAIL baseline; an assertion about UNCHANGED behavior that fails baseline is a bug in the check itself, and at run time it would burn a worker's attempts against something no model can satisfy. Fix the check before spawning.
+
 ## Make your agent actually use this
 
 Between swarms, agents drift back to invisible inline work. Reminders decay, so enforcement ships with the product.
@@ -194,6 +206,22 @@ grok login
 
 Route with per-task `"engine": "grok"` and pick the model with `"model": "grok-build"` or `"model": "grok-composer-2.5-fast"` (the shipped default — the speed pick). Grok brings its own OS sandbox on macOS (profile `workspace`: read everywhere, writes confined to the task dir, temp, and `~/.grok`), and its JSON output exposes no token counts — plan-billed workers report cost as included in plan.
 
+`args_template` is an argv array, not a shell string. Ringer replaces `{taskdir}`, `{spec}`, and `{model}` inside each argv element. `{access_args}`, `{sandbox_args}`, `{full_access_args}`, `{model_args}` (becomes `-m <resolved model>` when the task or engine names one), and `{engine_args}` (the task's per-task `engine_args`) expand to multiple argv elements only when they appear as their own array item.
+
+Watch for variadic CLI flags. If an engine has a flag that consumes all following values, put `{spec}` before that flag. For Claude-style CLIs, prefer:
+
+```toml
+args_template = ["-p", "{spec}", "--allowedTools", "Bash"]
+```
+
+not:
+
+```toml
+args_template = ["-p", "--allowedTools", "Bash", "{spec}"]
+```
+
+Each worker process runs with cwd set to `workdir/<task.key>/`. Use absolute paths in `spec` when workers need shared inputs outside their task directory.
+
 ## Ringside — mission control
 
 ![Ringside in the browser: a run's live results page with per-worker status and verification](docs/ringside.png)
@@ -211,6 +239,24 @@ Multiple swarms at once is the designed-for case: run three batches under three 
 
 A native desktop build (Tauri, under `hud/`) exists as a v0.1.1 prototype; the web dashboard is currently ahead of it — start there.
 
+## Self-update
+
+Ringer checks `origin/main` at process start, before it dispatches the requested command. Checks are throttled to once per hour by default. You can also run `./ringer.py self-update` for an immediate, human-readable check that ignores the throttle.
+
+An automatic update applies only when the checkout containing `ringer.py` is on `main`, has no tracked changes, and `origin/main` can be reached with a fast-forward-only update. Untracked files do not block it. After applying, Ringer restarts the original invocation so the requested command runs on the new code.
+
+Ringer never creates a merge commit, never rebases, never stashes or deletes changes, and never updates a dirty tracked tree. Regular commands do not update in the middle of a run: their only check happens at process start before dispatch.
+
+The persistent `hud` command is the exception for long-running code. It checks on the configured interval and restarts itself after an ff-only update. It also restarts when the checkout's on-disk HEAD changes after a manual pull. Before restarting it closes the HTTP server, whose socket is configured for immediate reuse. If an update is available but blocked, Ringside keeps serving the running code and shows the reason in a dismissible banner.
+
+Disable automatic checks for one invocation with `--no-self-update`, for an environment or service with `RINGER_NO_SELF_UPDATE=1`, or permanently in config:
+
+```toml
+[update]
+auto = false
+check_interval_s = 3600
+```
+
 ## The eval loop
 
 ![Timed, verified, logged](docs/eval-loop.png)
@@ -221,7 +267,7 @@ Every worker attempt — pass, fail, timeout, retry — is logged with its spec,
 
 ### Model identity taxonomy
 
-The scoreboard keeps the trained model, its lab, the invoking harness, the access plan, and any explicit reasoning effort as separate fields. Reserved test names never render, and historical rows without a stamped model are quarantined instead of being credited to an engine default. See the normative [model identity taxonomy](docs/TAXONOMY.md).
+The scoreboard keeps the trained model, its lab, the invoking harness, the access plan, and any explicit reasoning effort as separate fields. Reserved test names never render, and historical rows without a stamped model are quarantined instead of being credited to an engine default. Models with a declared canonical access route are enforced at lint and run time — a manifest that reaches a model through a non-sanctioned harness/slug is refused unless you pass `--allow-noncanonical-route`, and historical rows from such routes display as `misrouted` and are never ranked. See the normative [model identity taxonomy](docs/TAXONOMY.md).
 
 Every task attempt is logged **automatically and locally** to `~/.ringer/runs.jsonl` — no setup, no account, nothing leaves your machine. Each row carries the per-attempt verdict straight from the EXECUTED check, plus duration, tokens, the resolved `model`, the task's `task_type` (if the manifest set one), and the `retry` number.
 
@@ -303,6 +349,17 @@ Four rules are baked into every worker invocation. They all cost us real debuggi
 3. **Verification executes the artifact** — an agent's own "done" is not evidence. Exit codes are.
 4. **Raw output only** — logs and eval rows carry verbatim worker output, never a summary. Anything that needs judgment reads the raw data.
 
+## Contributors
+
+Every community PR that lands in main is credited here — that's a project rule, enforced by a test. Thank you:
+
+- [@oceanonline](https://github.com/oceanonline) — portable `python3` in template checks + lint quickstart path fix (#24)
+- [@davekopecek](https://github.com/davekopecek) (Dave Kopecek) — committed the design-reference fixture so the design-token guard runs on every machine (#30)
+- [@snapsynapse](https://github.com/snapsynapse) (Sam Rogers) — graceful shutdown on SIGINT/SIGTERM with worker-tree cleanup and finished state, plus the 14-test end-to-end CLI regression suite (#4)
+- [@mlava](https://github.com/mlava) (Mark Lavercombe) — named setup failures across every diagnostic surface (#37) and `run --baseline`, the no-workers check preflight (#38)
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the philosophy and what gets a PR merged fast. The short version: small and scoped, rebased on current main, every claim backed by an executed test. Authorship is always preserved — where a maintainer pushes a mechanical fix to your branch, you remain the commit author.
+
 ## License
 
 [PolyForm Shield 1.0.0](LICENSE.md) — free to use, modify, and share, including inside your own commercial work. The one thing you can't do is offer Ringer or Ringside (or a derivative that competes with them) as a product or service of your own. Commercial rights to the tool itself belong to Nate Jones Media LLC.
@@ -317,4 +374,4 @@ Four rules are baked into every worker invocation. They all cost us real debuggi
 
 ---
 
-Built by [Jon Edwards](https://limitededitionjonathan.com) and his agent fleet — a Claude orchestrator wrote the specs and reviewed the diffs, Codex swarms wrote the implementation, and this repo's own eval table caught its first three bugs. The tool is its own proof of concept.
+Built by [Nate Jones](https://natejones.com) and maintained by [LEJ](https://limitededitionjonathan.com) — a Claude orchestrator wrote the specs and reviewed the diffs, Codex swarms wrote the implementation, and this repo's own eval table caught its first three bugs. The tool is its own proof of concept.

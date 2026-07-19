@@ -57,6 +57,8 @@ class DesignReferenceTests(unittest.TestCase):
         f"design reference HTML not present on this machine: {REFERENCE}",
     )
     def test_renderer_tokens_match_design_reference(self) -> None:
+        # The fixture is committed; a missing file is a broken guard, never a skip.
+        self.assertTrue(REFERENCE.is_file(), f"committed design reference fixture is missing: {REFERENCE}")
         reference_css = REFERENCE.read_text(encoding="utf-8")
 
         expected_dark = token_values(css_block(reference_css, ":root"))
@@ -96,8 +98,10 @@ class DesignReferenceTests(unittest.TestCase):
         self.assertIn('<div class="work-group">', html)
         self.assertIn('<div class="worker">', html)
         self.assertIn('<span class="state pass">finished &amp; checked</span>', html)
-        self.assertIn('aria-label="contract-a: sent back — redoing"', html)
-        self.assertIn('aria-label="contract-b: working"', html)
+        # Upstream's tighter rounds-strip assertions (exact span markup)
+        # subsume the loose aria-label checks this test carried before.
+        self.assertIn('<span class="retry" aria-label="contract-a: sent back — redoing"></span>', html)
+        self.assertIn('<span class="working" aria-label="contract-b: working"></span>', html)
         self.assertNotIn('<span class="state retry">', html)
 
     def test_final_page_uses_static_dot(self) -> None:

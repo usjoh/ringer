@@ -28,7 +28,7 @@ class BindErrorTests(unittest.TestCase):
 
     def test_persistent_hud_eperm_reports_environment_limit(self) -> None:
         error = PermissionError(errno.EPERM, "Operation not permitted")
-        with mock.patch.object(ringer, "ThreadingHTTPServer", side_effect=error):
+        with mock.patch.object(ringer, "ReusableThreadingHTTPServer", side_effect=error):
             with self.assertRaises(ringer.BindNotPermittedError) as caught:
                 self.persistent_server().start()
 
@@ -36,7 +36,7 @@ class BindErrorTests(unittest.TestCase):
 
     def test_persistent_hud_address_in_use_keeps_existing_advice(self) -> None:
         error = OSError(errno.EADDRINUSE, "Address already in use")
-        with mock.patch.object(ringer, "ThreadingHTTPServer", side_effect=error):
+        with mock.patch.object(ringer, "ReusableThreadingHTTPServer", side_effect=error):
             with self.assertRaises(RuntimeError) as caught:
                 self.persistent_server().start()
 
@@ -48,7 +48,7 @@ class BindErrorTests(unittest.TestCase):
 
     def test_persistent_hud_eacces_reports_underlying_error(self) -> None:
         error = PermissionError(errno.EACCES, "Permission denied")
-        with mock.patch.object(ringer, "ThreadingHTTPServer", side_effect=error):
+        with mock.patch.object(ringer, "ReusableThreadingHTTPServer", side_effect=error):
             with self.assertRaises(RuntimeError) as caught:
                 self.persistent_server().start()
 
@@ -57,6 +57,8 @@ class BindErrorTests(unittest.TestCase):
         self.assertNotIn("already in use", str(caught.exception))
 
     def test_dashboard_eperm_stops_after_first_bind_attempt(self) -> None:
+        # The transient per-run dashboard still binds plain ThreadingHTTPServer;
+        # only the persistent HUD uses upstream's ReusableThreadingHTTPServer.
         error = PermissionError(errno.EPERM, "Operation not permitted")
         with mock.patch.object(ringer, "ThreadingHTTPServer", side_effect=error) as constructor:
             with self.assertRaises(ringer.BindNotPermittedError):

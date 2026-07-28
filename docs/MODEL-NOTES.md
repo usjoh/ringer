@@ -13,6 +13,7 @@ what happened, and what you'd do differently. Only write what the executed
 checks and raw logs support — no vibes, no worker self-reports.
 
 ## codex (GPT-5-class, own harness)
+- 2026-07-18 (sextant, q5-phase2-stage-a): code-review ×3 at high — 3/3 first-try, probe quality excellent (reproduced a RecursionError scan-kill, a closed-stdout stderr leak w/ exit 120, and a sanitize-collision by executing throwaway fixtures; every finding file:line-cited). code-fix ×2 at high in worktrees — both substance-complete with suites green, both marked FAIL on an ORCHESTRATOR spec defect: the spec said write fix-summary.md "in your task directory (NOT the worktree)" but the fix-swarm check resolves --summary relative to the worktree cwd. Patches were verified green in surviving worktrees and applied. Lesson: quote the template's summary-location contract verbatim in fix specs; do not paraphrase it.
 
 - Strongest general worker; the default engine. Spend reasoning effort per
   task via `engine_args` (`["-c", "model_reasoning_effort=low|medium|high"]`)
@@ -109,6 +110,7 @@ checks and raw logs support — no vibes, no worker self-reports.
   checklist at the TOP of fix specs with multiple sub-fixes.
 
 ## glm-5.2 via opencode (`openrouter/z-ai/glm-5.2`)
+- 2026-07-18 (sextant, q5-phase2-stage-a, exploration slot): code-review (contract-conformance, doc-vs-doc) — substance GOOD: 2 real findings (an exit-code rendering ambiguity, a Stage-B strip omission), both absorbed into the shipped fix; huge reasoning trace, careful quote-both-sides evidence. Marked FAIL by the stock review-swarm check: its Summary rule counts non-empty LINES (max 3) and GLM's 3 bullets wrapped to 6 lines. Check-strictness class (strict-on-format), not a model failure. Retry did not fix it (same wrapping). If reusing the stock check with verbose models, either widen the line rule or spec single-line bullets explicitly.
 
 - The cheap-intelligence default (~$0.74/M in, $2.33/M out, 2026-07 —
   20-30x cheaper output than frontier coding models). Reliable on

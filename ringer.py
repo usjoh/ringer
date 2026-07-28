@@ -1227,6 +1227,8 @@ def lint_manifest(
                     f"manifest: write collision on {path}: listed by {', '.join(task_keys)}."
                 )
 
+    findings.extend(unreachable_deliverable_findings(manifest))
+
     if not allow_noncanonical_route:
         findings.extend(
             noncanonical_route_findings(
@@ -1399,6 +1401,112 @@ def strip_common_redirections(command: str) -> str:
 
 def is_relative_expect_file(path: str) -> bool:
     return bool(path.strip()) and not path.startswith("~") and not Path(path).is_absolute()
+
+
+# An absolute POSIX path as it appears in prose or a shell command. The
+# lookbehind keeps it from starting mid-token, and the trailing punctuation is
+# stripped separately because specs end sentences on paths ("...--output_dir
+# /tmp/out/chunk1.").
+ABSOLUTE_PATH_TOKEN_RE = re.compile(r"(?<![\w~])(/[^\s'\"`;,]+)")
+PATH_TRAILING_PUNCT = ".,;:)]}'\"`"
+
+
+def absolute_path_tokens(text: str) -> list[Path]:
+    """Absolute paths mentioned anywhere in a spec or check, best effort."""
+    tokens: list[Path] = []
+    for match in ABSOLUTE_PATH_TOKEN_RE.finditer(text or ""):
+        raw = match.group(1).rstrip(PATH_TRAILING_PUNCT)
+        if len(raw) > 1:
+            tokens.append(Path(raw))
+    return tokens
+
+
+def mentions_relative_deliverable(text: str, rel: str) -> bool:
+    """True when `rel` appears as its own token, not as part of a longer path.
+
+    `report.md` in `diff /golden/report.md report.md` is evidence the task
+    really does write into the task directory, so the absolute mention is a
+    reference input rather than the output location — not a mismatch.
+    """
+    text = text or ""
+    for match in re.finditer(re.escape(rel), text):
+        before = text[match.start() - 1] if match.start() else ""
+        after = text[match.end()] if match.end() < len(text) else ""
+        if before in "/\\" or before.isalnum() or after.isalnum():
+            continue
+        return True
+    return False
+
+
+def path_ends_with(candidate: Path, rel: str) -> bool:
+    rel_parts = Path(rel).parts
+    return bool(rel_parts) and candidate.parts[-len(rel_parts) :] == rel_parts
+
+
+def resolve_for_compare(path: Path) -> Path:
+    """Normalize a path so it can be compared against a resolved taskdir.
+
+    Manifests are written with the paths a human types ('/tmp/out/report.md')
+    while workdir is stored resolved, and on macOS /tmp and /var are symlinks
+    into /private. Comparing the two forms directly reports agreement as a
+    mismatch and vice versa.
+    """
+    try:
+        return path.resolve()
+    except OSError:
+        return path
+
+
+def unreachable_deliverable_findings(manifest: Manifest) -> list[str]:
+    """Deliverables Ringer will verify somewhere the manifest never writes to.
+
+    Relative `expect_files` resolve against the TASK DIRECTORY, but a spec is
+    free to send the worker's output to an absolute path elsewhere. When it
+    does, the check can pass on the real files while verification looks at a
+    path nothing ever wrote — so the task is recorded FAIL, retried, and fails
+    again for exactly the same reason.
+
+    Seen live 2026-07-16 (lou-call-transcript): four whisper transcriptions
+    each completed and each check exited 0 reporting full audio coverage, but
+    every task was recorded FAIL and re-run, burning ~5.3 hours of CPU for zero
+    recorded output. This is the same defect class as the fix-swarm
+    summary-location mismatch in docs/MODEL-NOTES.md — a path contract that
+    disagrees with where verification looks.
+    """
+    findings: list[str] = []
+    for task in manifest.tasks:
+        taskdir = (manifest.workdir / task.key).resolve()
+        haystack = f"{task.spec}\n{task.check}"
+        # Keep the written form for the message and the resolved form for
+        # comparison — the user recognizes what they typed.
+        candidates = [(raw, resolve_for_compare(raw)) for raw in absolute_path_tokens(haystack)]
+        for rel in task.expect_files:
+            if not is_relative_expect_file(rel):
+                continue
+            expected = (taskdir / rel).resolve()
+            # The task also names the path verification will actually use, so
+            # the two agree somewhere — a same-named file elsewhere is then a
+            # reference input, not a competing output location.
+            if any(resolved == expected for _, resolved in candidates):
+                continue
+            if mentions_relative_deliverable(haystack, rel):
+                continue
+            # A path INSIDE the task directory but at a different location is
+            # still a mismatch: verification looks only at `expected`.
+            elsewhere = [
+                raw for raw, resolved in candidates if path_ends_with(resolved, rel) and resolved != expected
+            ]
+            if not elsewhere:
+                continue
+            findings.append(
+                f"ERROR: {task.key}: expect_files '{rel}' is verified at {expected}, "
+                f"but this task writes it to {elsewhere[0]}. Relative expect_files "
+                "resolve against the task directory, so the check can pass on the real "
+                "file while the task is still recorded FAIL and retried identically. "
+                "Declare the deliverable as that absolute path, or have the worker "
+                "write it into the task directory."
+            )
+    return findings
 
 
 def instructs_git_commit(spec: str) -> bool:
@@ -8015,6 +8123,23 @@ class Verifier:
         ok = not missing_files and not check_timed_out and check_returncode == 0
         if missing_files:
             missing_message = f"[ringer] missing expected files: {', '.join(missing_files)}"
+            if check_returncode == 0 and not check_timed_out:
+                # The check proved the work; only the declared location
+                # disagrees. The bare relative list reads as "the worker
+                # produced nothing" and sits directly in front of the check's
+                # own success output, which is how a path mismatch went
+                # undiagnosed for twelve days (lou-call-transcript,
+                # 2026-07-16). Name the resolved paths instead.
+                resolved = "\n".join(
+                    f"    {rel} -> {self._expect_file_path(taskdir, rel)}" for rel in missing_files
+                )
+                missing_message += (
+                    "\n[ringer] the check PASSED (exit 0) but these deliverables were not "
+                    "found. Relative expect_files resolve against the task directory "
+                    f"({taskdir}). Looked for:\n{resolved}\n"
+                    "[ringer] if the worker writes elsewhere, declare the deliverable as an "
+                    "absolute path — otherwise the retry fails identically."
+                )
             output = f"{missing_message}\n{output}" if output.strip() else missing_message
         elif not check_timed_out and check_returncode != 0 and not output.strip():
             # A silent failing check wastes the retry (no failure context to

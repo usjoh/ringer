@@ -299,6 +299,265 @@ class LintManifestTests(unittest.TestCase):
         )
         self.assertEqual([], lint_manifest(manifest), "compliant manifest should have no lint findings")
 
+    def test_w10_deliverable_verified_where_nothing_writes(self) -> None:
+        # The lou-call-transcript shape (2026-07-16): the spec sends output to
+        # an absolute directory that is a SIBLING of the task directory, while
+        # expect_files stays relative — so verification looks inside the task
+        # directory, finds nothing, and records FAIL even though the check
+        # passed on the real files. Four tasks, ~5.3 hours of CPU, zero output.
+        spec = (
+            "You are a one-task transcription runner. Run whisper on the chunk and let it "
+            "finish; it is CPU transcription and may take 10-30 minutes. Execute exactly: "
+            "whisper /work/chunks/chunk1.mp3 --model turbo --output_format all "
+            "--output_dir /work/out/chunk1. Leave the files exactly where whisper puts them. "
+            "Do not paraphrase, summarize, or fabricate a transcript."
+        )
+        check = (
+            "python3 /work/check_chunk.py --json /work/out/chunk1/chunk1.json "
+            "--txt /work/out/chunk1/chunk1.txt --dur 947"
+        )
+        findings = lint_manifest(
+            self.manifest(
+                [self.task(spec=spec, check=check, expect_files=["out/chunk1/chunk1.txt"])]
+            )
+        )
+        errors = [item for item in findings if item.startswith("ERROR:")]
+        self.assertEqual(1, len(errors), f"expected exactly one blocking finding, got: {findings}")
+        self.assertIn("out/chunk1/chunk1.txt", errors[0])
+        self.assertIn("/work/out/chunk1/chunk1.txt", errors[0])
+        # Blocking matters: a warning would have printed into an unwatched run
+        # and changed nothing.
+        self.assertTrue(errors[0].startswith("ERROR:"), errors[0])
+
+    def test_w10_reference_input_with_same_name_is_not_a_mismatch(self) -> None:
+        # `diff /golden/report.md report.md` names the deliverable relatively
+        # too, so the absolute path is a reference INPUT, not the output
+        # location. Firing here would block a legitimate manifest.
+        findings = lint_manifest(
+            self.manifest(
+                [
+                    self.task(
+                        check="diff /golden/report.md report.md || { echo 'FAIL: drift'; exit 1; }",
+                        expect_files=["report.md"],
+                    )
+                ]
+            )
+        )
+        self.assertEqual(
+            [], [item for item in findings if item.startswith("ERROR:")], findings
+        )
+
+    def test_w10_absolute_expect_files_are_exempt(self) -> None:
+        # An absolute expect_files entry is verified exactly where it is
+        # declared, so it cannot disagree with the task directory.
+        findings = lint_manifest(
+            self.manifest(
+                [
+                    self.task(
+                        spec=LONG_SPEC + " Write the transcript to /work/out/chunk1/chunk1.txt.",
+                        check="test -s /work/out/chunk1/chunk1.txt || { echo 'FAIL'; exit 1; }",
+                        expect_files=["/work/out/chunk1/chunk1.txt"],
+                    )
+                ]
+            )
+        )
+        self.assertEqual(
+            [], [item for item in findings if item.startswith("ERROR:")], findings
+        )
+
+    def test_w10_task_naming_the_resolved_path_is_clean(self) -> None:
+        # When the task also names the path verification will actually use,
+        # the two agree and there is nothing to warn about. Build the workdir
+        # explicitly: self.manifest() mints a fresh temp dir per call, so a
+        # taskdir borrowed from a second manifest is a genuinely different path.
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        workdir = Path(temp_dir.name) / "work"
+        deliverable = (workdir / "one" / "report.md").resolve()
+        manifest = Manifest.from_obj(
+            {
+                "run_name": "lint-test",
+                "workdir": str(workdir),
+                "max_parallel": 1,
+                "tasks": [
+                    self.task(
+                        spec=LONG_SPEC + f" Write your report to {deliverable}.",
+                        check=f"test -s {deliverable} || {{ echo 'FAIL: no report'; exit 1; }}",
+                        expect_files=["report.md"],
+                    )
+                ],
+            }
+        )
+        findings = lint_manifest(manifest)
+        self.assertEqual(
+            [], [item for item in findings if item.startswith("ERROR:")], findings
+        )
+
+    def w10_manifest(self, *, spec_tail: str, check: str, expect_files: list[str]) -> Manifest:
+        """A one-task manifest whose workdir is resolved up front.
+
+        Paths typed into a spec must be compared against the RESOLVED workdir:
+        tempfile hands back /var/... which resolves to /private/var/... on
+        macOS, and treating those as different paths is exactly the bug this
+        helper's callers pin down.
+        """
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        workdir = (Path(temp_dir.name) / "work").resolve()
+        return Manifest.from_obj(
+            {
+                "run_name": "lint-test",
+                "workdir": str(workdir),
+                "max_parallel": 1,
+                "tasks": [
+                    self.task(
+                        spec=LONG_SPEC + " " + spec_tail.format(taskdir=workdir / "one"),
+                        check=check.format(taskdir=workdir / "one"),
+                        expect_files=expect_files,
+                    )
+                ],
+            }
+        )
+
+    def test_w10_mismatch_inside_the_task_directory_still_fires(self) -> None:
+        # Landing in the task directory is not enough — verification looks at
+        # exactly <taskdir>/<expect_files entry>. Writing to a subdirectory of
+        # the task directory fails the same way as writing to a sibling.
+        findings = lint_manifest(
+            self.w10_manifest(
+                spec_tail="Write the report to {taskdir}/sub/report.md.",
+                check="test -s {taskdir}/sub/report.md || {{ echo 'FAIL: no report'; exit 1; }}",
+                expect_files=["report.md"],
+            )
+        )
+        errors = [item for item in findings if item.startswith("ERROR:")]
+        self.assertEqual(1, len(errors), f"in-taskdir mismatch should fire: {findings}")
+        self.assertIn("sub/report.md", errors[0])
+
+    def test_w10_same_name_reference_input_beside_the_real_path_is_clean(self) -> None:
+        # The task names the path verification will actually use AND a
+        # same-named file elsewhere. The latter is a reference input; firing
+        # here would block a legitimate manifest.
+        findings = lint_manifest(
+            self.w10_manifest(
+                spec_tail="Use /golden/report.md as the format reference, then write {taskdir}/report.md.",
+                check="test -s {taskdir}/report.md || {{ echo 'FAIL: no report'; exit 1; }}",
+                expect_files=["report.md"],
+            )
+        )
+        self.assertEqual([], [item for item in findings if item.startswith("ERROR:")], findings)
+
+    def test_w10_symlinked_path_is_not_a_false_mismatch(self) -> None:
+        # A spec typed with the path a human uses ('/tmp/run/out/report.md')
+        # against a workdir stored RESOLVED ('/private/tmp/...' on macOS)
+        # describes the SAME file. Comparing the two written forms directly
+        # reports agreement as a mismatch.
+        #
+        # Build the symlink here rather than leaning on /tmp: /tmp is a symlink
+        # on macOS and a real directory on Linux, so borrowing the platform's
+        # own layout makes the test pass for the wrong reason on one of them.
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        root = Path(temp_dir.name).resolve()
+        real = root / "real"
+        real.mkdir()
+        link = root / "link"
+        try:
+            link.symlink_to(real, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:  # pragma: no cover - platform guard
+            self.skipTest(f"symlinks unavailable on this platform: {exc}")
+
+        as_typed = link / "work" / "one" / "report.md"
+        manifest = Manifest.from_obj(
+            {
+                "run_name": "lint-test",
+                "workdir": str(link / "work"),
+                "max_parallel": 1,
+                "tasks": [
+                    self.task(
+                        spec=LONG_SPEC + f" Write the report to {as_typed}.",
+                        check=f"test -s {as_typed} || {{ echo 'FAIL: no report'; exit 1; }}",
+                        expect_files=["report.md"],
+                    )
+                ],
+            }
+        )
+        self.assertEqual(
+            manifest.workdir,
+            real / "work",
+            "manifest workdir should resolve through the symlink",
+        )
+        self.assertNotEqual(
+            str(manifest.workdir), str(link / "work"), "test needs the two written forms to differ"
+        )
+        findings = lint_manifest(manifest)
+        self.assertEqual([], [item for item in findings if item.startswith("ERROR:")], findings)
+
+    def test_w10_matches_on_path_shape_not_bare_filename(self) -> None:
+        # The rule matches the declared path SUFFIX, not just the basename.
+        # A multi-component deliverable like out/chunk1/chunk1.txt must not be
+        # flagged against every unrelated chunk1.txt a spec happens to name —
+        # here the input audio directory — or the guard becomes noise and gets
+        # switched off.
+        # Neither earlier suppression applies here: no absolute path equals the
+        # resolved deliverable, and 'out/chunk1/chunk1.txt' never appears as a
+        # bare token. So the suffix comparison alone decides the outcome, and a
+        # basename-only rule would fire on the unrelated /inputs/chunk1.txt.
+        findings = lint_manifest(
+            self.w10_manifest(
+                spec_tail=(
+                    "Read the source audio index at /inputs/chunk1.txt for reference, then "
+                    "write the transcript as chunk1.txt inside the out/chunk1 folder of your "
+                    "own task directory."
+                ),
+                check="python3 /tools/verify_chunk.py --dir out/chunk1 || {{ echo 'FAIL: bad chunk'; exit 1; }}",
+                expect_files=["out/chunk1/chunk1.txt"],
+            )
+        )
+        self.assertEqual([], [item for item in findings if item.startswith("ERROR:")], findings)
+
+    def test_w10_verifier_explains_a_passing_check_with_missing_deliverables(self) -> None:
+        # The runtime half: when the check exits 0 but the declared
+        # deliverables are absent, the old output was the bare relative list
+        # jammed in front of the check's own success text, which read as "the
+        # worker produced nothing". Name the resolved path instead.
+        with tempfile.TemporaryDirectory() as root:
+            taskdir = Path(root) / "task"
+            taskdir.mkdir()
+            task = TaskSpec(
+                key="one",
+                spec=LONG_SPEC,
+                check="echo 'OK: 2906 words, coverage to 947s of 947s'",
+                expect_files=("out/chunk1/chunk1.txt",),
+            )
+            result = asyncio.run(Verifier().verify(task, taskdir))
+        self.assertFalse(result.ok)
+        self.assertEqual(0, result.check_returncode)
+        excerpt = result.raw_output_excerpt
+        self.assertIn("the check PASSED (exit 0)", excerpt)
+        self.assertIn(str(taskdir / "out/chunk1/chunk1.txt"), excerpt)
+        self.assertIn("declare the deliverable as an absolute path", excerpt)
+        # The check's own output must survive alongside the explanation.
+        self.assertIn("2906 words", excerpt)
+
+    def test_w10_failing_check_keeps_the_plain_missing_message(self) -> None:
+        # The explainer is specifically about a PASSING check disagreeing with
+        # verification. A genuinely failing check should not be told its files
+        # were merely in the wrong place.
+        with tempfile.TemporaryDirectory() as root:
+            taskdir = Path(root) / "task"
+            taskdir.mkdir()
+            task = TaskSpec(
+                key="one",
+                spec=LONG_SPEC,
+                check="echo 'FAIL: whisper died'; exit 1",
+                expect_files=("out/chunk1/chunk1.txt",),
+            )
+            result = asyncio.run(Verifier().verify(task, taskdir))
+        self.assertFalse(result.ok)
+        self.assertIn("missing expected files", result.raw_output_excerpt)
+        self.assertNotIn("the check PASSED", result.raw_output_excerpt)
+
     def test_templates_are_clean(self) -> None:
         # Every kit ships one or more manifest skeletons (manifest.json plus
         # optional manifest-round*.json for multi-round kits).

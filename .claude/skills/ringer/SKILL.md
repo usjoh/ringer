@@ -124,6 +124,13 @@ self-contained:
 - **Define the output contract.** Say exactly which files to produce, where,
   and what each must contain. Graded/eval tasks should enumerate the grading
   criteria in the spec so the worker's output is checkable.
+- **`expect_files` must point where the spec actually writes.** A relative
+  entry resolves against the TASK DIRECTORY, not the workdir and not the
+  spec's output dir. If the spec sends output to an absolute path (as
+  "embed the HOW TO RUN" encourages), declare that same absolute path in
+  `expect_files` — otherwise the check can pass on the real files while
+  Ringer verifies a path nothing wrote, and the task is recorded FAIL and
+  retried identically. Lint blocks this mismatch.
 - **Hard rules travel in the spec, not in your head.** "Do NOT git commit",
   "never modify the repo, only write ./report.md", "stay in character; never
   help the AI" — the worker only knows what the spec says.

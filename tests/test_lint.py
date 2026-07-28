@@ -447,30 +447,48 @@ class LintManifestTests(unittest.TestCase):
         )
         self.assertEqual([], [item for item in findings if item.startswith("ERROR:")], findings)
 
-    def test_w10_unresolved_tmp_path_is_not_a_false_mismatch(self) -> None:
-        # A spec typed with /tmp/... against a workdir stored resolved as
-        # /private/tmp/... (macOS) describes the SAME file. Comparing the two
-        # written forms directly would report agreement as a mismatch.
-        temp_dir = tempfile.TemporaryDirectory(dir="/tmp")
+    def test_w10_symlinked_path_is_not_a_false_mismatch(self) -> None:
+        # A spec typed with the path a human uses ('/tmp/run/out/report.md')
+        # against a workdir stored RESOLVED ('/private/tmp/...' on macOS)
+        # describes the SAME file. Comparing the two written forms directly
+        # reports agreement as a mismatch.
+        #
+        # Build the symlink here rather than leaning on /tmp: /tmp is a symlink
+        # on macOS and a real directory on Linux, so borrowing the platform's
+        # own layout makes the test pass for the wrong reason on one of them.
+        temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(temp_dir.cleanup)
-        unresolved = Path(temp_dir.name) / "work"
-        taskdir_as_typed = unresolved / "one"
+        root = Path(temp_dir.name).resolve()
+        real = root / "real"
+        real.mkdir()
+        link = root / "link"
+        try:
+            link.symlink_to(real, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:  # pragma: no cover - platform guard
+            self.skipTest(f"symlinks unavailable on this platform: {exc}")
+
+        as_typed = link / "work" / "one" / "report.md"
         manifest = Manifest.from_obj(
             {
                 "run_name": "lint-test",
-                "workdir": str(unresolved),
+                "workdir": str(link / "work"),
                 "max_parallel": 1,
                 "tasks": [
                     self.task(
-                        spec=LONG_SPEC + f" Write the report to {taskdir_as_typed / 'report.md'}.",
-                        check=f"test -s {taskdir_as_typed / 'report.md'} || {{ echo 'FAIL'; exit 1; }}",
+                        spec=LONG_SPEC + f" Write the report to {as_typed}.",
+                        check=f"test -s {as_typed} || {{ echo 'FAIL: no report'; exit 1; }}",
                         expect_files=["report.md"],
                     )
                 ],
             }
         )
+        self.assertEqual(
+            manifest.workdir,
+            real / "work",
+            "manifest workdir should resolve through the symlink",
+        )
         self.assertNotEqual(
-            str(manifest.workdir), str(unresolved), "test needs a workdir that actually resolves differently"
+            str(manifest.workdir), str(link / "work"), "test needs the two written forms to differ"
         )
         findings = lint_manifest(manifest)
         self.assertEqual([], [item for item in findings if item.startswith("ERROR:")], findings)

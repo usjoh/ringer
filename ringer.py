@@ -1583,6 +1583,72 @@ class VerifyResult:
     missing_files: tuple[str, ...] = ()
 
 
+# Why a non-PASS attempt failed, in terms of WHO CAN FIX IT. Only
+# FAILURE_CLASS_MODEL is evidence about a model's ability; the rest are the
+# harness, the manifest, or the machine, and counting them against a model
+# corrupts exactly the routing signal the scoreboard exists to provide.
+FAILURE_CLASS_MODEL = "model"
+FAILURE_CLASS_ENGINE = "engine-error"
+FAILURE_CLASS_DELIVERABLE_PATH = "deliverable-path"
+FAILURE_CLASS_CHECK_TIMEOUT = "check-timeout"
+FAILURE_CLASS_WORKER_TIMEOUT = "worker-timeout"
+FAILURE_CLASS_UNKNOWN = "unknown"
+# Everything that is not FAILURE_CLASS_MODEL is excluded from a per-model pass
+# rate. "unknown" is excluded too: a failure nobody can attribute must not be
+# charged to the model by default, which is precisely the bias being removed.
+NON_MODEL_FAILURE_CLASSES = (
+    FAILURE_CLASS_ENGINE,
+    FAILURE_CLASS_DELIVERABLE_PATH,
+    FAILURE_CLASS_CHECK_TIMEOUT,
+    FAILURE_CLASS_WORKER_TIMEOUT,
+    FAILURE_CLASS_UNKNOWN,
+)
+
+
+def classify_attempt_failure(
+    verdict: str,
+    worker: "WorkerResult",
+    verify: "VerifyResult",
+) -> str:
+    """Attribute a non-PASS attempt to the layer that produced it.
+
+    Every branch requires POSITIVE evidence. The tempting shortcut — "the
+    worker exited nonzero and reported no tokens, so no model ran" — was
+    tested against the surviving worker logs of the 18 rows it matches and is
+    WRONG for 5 of them: opencode can drive a model through 20-30 tool calls
+    and still exit without emitting a parseable token count. Trusting it would
+    have excused genuine model failures as infrastructure, inflating exactly
+    the pass rates this field exists to make honest.
+
+    - engine-error / worker-timeout: Ringer's own signal that the worker never
+      ran or never finished. `worker.error` covers setup and spawn failures.
+    - check-timeout: the check never finished, so it judged nothing.
+    - deliverable-path: the check exited 0 and the declared deliverables were
+      absent — verification looked where the work never landed. The whole
+      lou-call-transcript run (4 tasks, ~5.3h of CPU) is this.
+    - model: the engine exited CLEANLY and the check then rejected the output.
+      A clean engine exit is what makes this attributable: the harness did its
+      job, so the rejection is about content. Only this class belongs in a
+      per-model pass rate.
+    - unknown: the engine exited nonzero with no error Ringer recorded. That is
+      genuinely ambiguous — an engine crash and a model that drove the engine
+      into a bad state look identical from here. Say so instead of guessing.
+    """
+    if verdict == "PASS":
+        return ""
+    if worker.error:
+        return FAILURE_CLASS_ENGINE
+    if worker.timed_out:
+        return FAILURE_CLASS_WORKER_TIMEOUT
+    if verify.check_timed_out:
+        return FAILURE_CLASS_CHECK_TIMEOUT
+    if verify.missing_files and verify.check_returncode == 0:
+        return FAILURE_CLASS_DELIVERABLE_PATH
+    if worker.returncode == 0:
+        return FAILURE_CLASS_MODEL
+    return FAILURE_CLASS_UNKNOWN
+
+
 class ProcessTree:
     @staticmethod
     def read() -> tuple[dict[int, list[int]], dict[int, str]]:
@@ -5390,6 +5456,79 @@ def model_log_row_reasoning_effort(row: dict[str, Any]) -> str | None:
     return effort or None
 
 
+def model_log_row_failure_class(row: dict[str, Any]) -> str | None:
+    """The recorded failure class, or what the older signals still prove.
+
+    Rows written before the class was recorded carry no verdict on WHY they
+    failed, and guessing 'model' for them would reintroduce exactly the bias
+    this field exists to remove. So an old row is left unclassified (None)
+    unless its own recorded numbers settle it: an engine that reports tokens,
+    exiting nonzero, having reported none, never invoked a model.
+    """
+    explicit = model_log_text(row.get("failure_class"))
+    if explicit:
+        return explicit
+    notes = row.get("notes")
+    if isinstance(notes, str):
+        for line in notes.split("raw_check_output_first_2000_chars:")[0].splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() == "failure_class" and value.strip():
+                return value.strip()
+            if key.strip() == "worker_error" and value.strip():
+                return FAILURE_CLASS_ENGINE
+    if model_log_text(row.get("verdict")) == "PASS":
+        return None
+    # Only a CLEAN engine exit makes an old row attributable. Anything else is
+    # left unclassified rather than guessed: the "nonzero exit + no tokens
+    # means no model ran" shortcut is wrong for 5 of the 18 rows it matches in
+    # this repo's own log, where the worker drove 20-30 tool calls first.
+    returncode = model_log_notes_int(row, "worker_returncode")
+    if returncode is None:
+        return None
+    if returncode != 0:
+        return FAILURE_CLASS_UNKNOWN
+    if model_log_notes_int(row, "check_returncode") is None and "missing_expect_files=" in (
+        row.get("notes") or ""
+    ):
+        # Pre-check_returncode row with absent deliverables. "the model wrote
+        # nothing" and "verification looked in the wrong place" are identical
+        # from here, and the second really happened — the whole
+        # lou-call-transcript run passed its checks and was recorded FAIL.
+        # Charging the ambiguity to the model is the bias being removed.
+        return FAILURE_CLASS_UNKNOWN
+    return FAILURE_CLASS_MODEL
+
+
+def model_log_notes_int(row: dict[str, Any], key: str) -> int | None:
+    notes = row.get("notes")
+    if not isinstance(notes, str):
+        return None
+    for line in notes.split("raw_check_output_first_2000_chars:")[0].splitlines():
+        name, _, value = line.partition("=")
+        if name.strip() != key:
+            continue
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def model_log_row_is_model_attributable(row: dict[str, Any]) -> bool:
+    """True when this row is evidence about a model's ability.
+
+    A PASS always is. A failure only is when something the model produced was
+    actually judged — not when the engine died, the check timed out, or
+    verification looked at a path the work never reached.
+    """
+    if model_log_text(row.get("verdict")) == "PASS":
+        return True
+    failure_class = model_log_row_failure_class(row)
+    # None means the row does not say why it failed. Keeping it would charge an
+    # unexplained failure to the model, which is the bias this exists to remove.
+    return failure_class == FAILURE_CLASS_MODEL
+
+
 def model_log_row_is_reserved_fixture(row: dict[str, Any]) -> bool:
     return model_log_text(row.get("model")) in RESERVED_FIXTURE_MODELS
 
@@ -6098,7 +6237,8 @@ def create_read_model_schema(conn: Any) -> None:
             verdict TEXT,
             duration_ms INTEGER,
             worker_tokens INTEGER,
-            orchestrator TEXT
+            orchestrator TEXT,
+            failure_class TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_attempts_model_task_type
             ON attempts(model, task_type);
@@ -6155,6 +6295,8 @@ def create_read_model_schema(conn: Any) -> None:
         conn.execute("ALTER TABLE attempts ADD COLUMN reported_model TEXT")
     if not read_model_column_exists(conn, "attempts", "expected_model"):
         conn.execute("ALTER TABLE attempts ADD COLUMN expected_model TEXT")
+    if not read_model_column_exists(conn, "attempts", "failure_class"):
+        conn.execute("ALTER TABLE attempts ADD COLUMN failure_class TEXT")
     if not read_model_column_exists(conn, "identity", "lab"):
         conn.execute("ALTER TABLE identity ADD COLUMN lab TEXT")
     if not read_model_column_exists(conn, "identity", "alias"):
@@ -6261,6 +6403,7 @@ def insert_attempt_rows(conn: Any, rows: list[dict[str, Any]]) -> int:
                 model_log_int(row.get("duration_ms")),
                 model_log_int(row.get("worker_tokens")),
                 model_log_text(row.get("orchestrator")),
+                model_log_row_failure_class(row),
             )
         )
     if payloads:
@@ -6269,9 +6412,9 @@ def insert_attempt_rows(conn: Any, rows: list[dict[str, Any]]) -> int:
             INSERT INTO attempts (
                 run_id, task_key, logged_at, engine, model, reported_model, expected_model,
                 reasoning_effort, task_type, retry,
-                verdict, duration_ms, worker_tokens, orchestrator
+                verdict, duration_ms, worker_tokens, orchestrator, failure_class
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             payloads,
         )
@@ -8042,6 +8185,17 @@ def run_models_command(config: AppConfig, args: argparse.Namespace) -> int:
         rows, skipped = read_model_log_rows(log_path, since=since, engine=args.engine)
         identity_registry = load_model_identity_registry(registry_path)
         catalog_models_from_db = []
+    if getattr(args, "attributable", False):
+        kept = [row for row in rows if model_log_row_is_model_attributable(row)]
+        dropped = len(rows) - len(kept)
+        rows = kept
+        # Never let a filter shrink the evidence silently — the reader has to
+        # know how much of the record this rate is NOT based on.
+        print(
+            f"models: --attributable dropped {dropped} row(s) whose failure was not "
+            "attributable to a model (engine errors, deliverable-path mismatches, "
+            "timeouts, and failures the log cannot explain)."
+        )
     catalog_models = catalog_models_from_db if using_db else load_catalog_snapshot(catalog_path)
     notes_sections = parse_model_notes_sections(notes_path)
     groups = enrich_model_groups_with_notes(
@@ -8711,12 +8865,19 @@ class RingerRunner:
         reasoning_effort = effective_reasoning_effort_from_command(
             runtime.last_worker_command
         )
+        failure_class = classify_attempt_failure(verdict, worker, verify)
         notes_parts = [
             f"retry={'true' if retrying else 'false'}",
             f"worker_returncode={worker.returncode}",
+            # Recorded because it is the ONLY way to tell a check that rejected
+            # the model's work from one that passed while verification looked
+            # elsewhere. Its absence is why separating those needed forensics.
+            f"check_returncode={verify.check_returncode}",
             f"model={stamped_model}",
             f"task_type={runtime.task.task_type}",
         ]
+        if failure_class:
+            notes_parts.append(f"failure_class={failure_class}")
         if worker.error:
             notes_parts.append(f"worker_error={worker.error}")
         if verify.missing_files:
@@ -8753,6 +8914,7 @@ class RingerRunner:
                 "reasoning_effort": reasoning_effort,
                 "task_type": runtime.task.task_type,
                 "retry": retrying,
+                "failure_class": failure_class or None,
             }
         )
 
@@ -10157,6 +10319,12 @@ def build_parser() -> argparse.ArgumentParser:
     models_parser.add_argument("--model", help="only include one resolved model bucket")
     models_parser.add_argument("--engine", help="only include rows from one worker engine")
     models_parser.add_argument("--since", help="only include rows logged on or after YYYY-MM-DD")
+    models_parser.add_argument(
+        "--attributable",
+        action="store_true",
+        help="drop failures the model did not cause (engine errors, deliverable-path "
+             "mismatches, timeouts, and failures nothing can attribute)",
+    )
     models_parser.add_argument("--explore", action="store_true", help="show proven/probation tiers plus cheap untested catalog candidates")
     models_parser.add_argument("--catalog-file", type=Path, help="path to local OpenRouter catalog snapshot")
     models_parser.add_argument("--notes-file", type=Path, default=default_model_notes_path(), help="path to MODEL-NOTES.md judgment layer")

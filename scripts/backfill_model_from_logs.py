@@ -20,6 +20,7 @@ from typing import Any
 
 
 COMMAND_PREFIX = "[ringer.py] command: "
+ENGINE_PREFIX = "[ringer.py] engine: "
 BACKFILL_NOTE = "\nmodel_backfill=command_log"
 
 
@@ -52,6 +53,20 @@ def _model_from_tokens(tokens: list[str]) -> str | None:
                 model = value
         index += 1
     return model
+
+
+def engine_from_command_log(log_path: Path) -> str | None:
+    """Return the engine the log's worker actually ran, if it recorded one."""
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        if line.startswith(ENGINE_PREFIX):
+            value = line[len(ENGINE_PREFIX) :].strip()
+            if value:
+                return value
+    return None
 
 
 def model_from_command_log(log_path: Path) -> tuple[str | None, str | None]:
@@ -154,6 +169,30 @@ def process_lines(raw_lines: list[bytes], state_dir: Path) -> tuple[list[bytes],
         if log_path is None:
             counts["no_evidence"] += 1
             print(f"line {line_number} ({run_id}/{task_key}): skipped; {reason}")
+            continue
+
+        # A worker log lives in the TASK DIRECTORY, and Ringer lets two runs
+        # reuse one workdir — so the log on disk may belong to a LATER run that
+        # overwrote it. Stamping it anyway attributes one engine's work to
+        # another. Seen live: mcp-local-rag-review ran on codex at
+        # 2026-07-08T23:02:39Z and again on opencode/glm-5.2 four minutes
+        # later into the same reviews/mcp-local-rag/<task>/ directories; the
+        # surviving worker.log is entirely opencode, so backfilling the codex
+        # run's rows from it would have credited six codex failures to GLM.
+        row_engine = row.get("worker_engine") or row.get("engine")
+        log_engine = engine_from_command_log(log_path)
+        if (
+            isinstance(row_engine, str)
+            and row_engine
+            and log_engine
+            and log_engine != row_engine
+        ):
+            counts["no_evidence"] += 1
+            print(
+                f"line {line_number} ({run_id}/{task_key}): skipped; log belongs to a "
+                f"{log_engine} run but this row is {row_engine} — the task directory was "
+                "reused and the log was overwritten"
+            )
             continue
 
         model, reason = model_from_command_log(log_path)

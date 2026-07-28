@@ -71,6 +71,67 @@ class BackfillModelFromLogsTests(unittest.TestCase):
         self.assertIn("model '' -> 'gpt-5.6-sol'", result.stdout)
         self.assertIn("python3 ringer.py db rebuild --log", result.stdout)
 
+    def test_refuses_a_log_left_behind_by_a_different_engines_run(self) -> None:
+        # Worker logs live in the task directory, and Ringer lets two runs
+        # reuse one workdir — so the log on disk can belong to a LATER run
+        # that overwrote it. Seen live: mcp-local-rag-review ran on codex at
+        # 2026-07-08T23:02:39Z and again on opencode/glm-5.2 four minutes
+        # later into the same reviews/mcp-local-rag/<task>/ directories.
+        # Stamping the surviving opencode log onto the codex rows would have
+        # credited six codex failures to GLM.
+        original = {
+            "run_id": "run-1",
+            "task_key": "task-a",
+            "model": "",
+            "worker_engine": "codex",
+            "notes": "keep",
+        }
+        self.write_fixture(
+            original,
+            command_lines=[
+                "[ringer.py] attempt 1 started 2026-07-08T23:07:14.583078+00:00",
+                "[ringer.py] engine: opencode",
+                "[ringer.py] command: opencode-sandboxed.sh run -m openrouter/z-ai/glm-5.2 'spec'",
+            ],
+        )
+
+        result = self.run_script()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(original, self.read_rows()[0], "row must be left untouched")
+        self.assertIn("log belongs to a opencode run but this row is codex", result.stdout)
+        self.assertIn("no-evidence=1", result.stdout)
+
+    def test_stamps_when_the_logs_engine_matches_the_row(self) -> None:
+        # The guard must not block the case it was built to protect.
+        self.write_fixture(
+            {"run_id": "run-1", "task_key": "task-a", "model": "", "worker_engine": "codex"},
+            command_lines=[
+                "[ringer.py] engine: codex",
+                "[ringer.py] command: codex exec -m gpt-5.6-sol 'spec' < /dev/null",
+            ],
+        )
+
+        result = self.run_script()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("gpt-5.6-sol", self.read_rows()[0]["model"])
+        self.assertIn("stamped=1", result.stdout)
+
+    def test_stamps_when_the_log_records_no_engine(self) -> None:
+        # Older logs predate the engine line; absence of evidence must not
+        # become a refusal, or the guard silently disables the whole script.
+        self.write_fixture(
+            {"run_id": "run-1", "task_key": "task-a", "model": "", "worker_engine": "codex"},
+            command_lines=["[ringer.py] command: codex exec -m gpt-5.6-sol 'spec' < /dev/null"],
+        )
+
+        result = self.run_script()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("gpt-5.6-sol", self.read_rows()[0]["model"])
+        self.assertIn("stamped=1", result.stdout)
+
     def test_does_not_guess_without_model_flag(self) -> None:
         original = {"run_id": "run-1", "task_key": "task-a", "notes": "keep"}
         self.write_fixture(

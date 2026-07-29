@@ -6974,6 +6974,59 @@ def model_judgment_notes(model_id: str, notes_sections: dict[str, list[str]]) ->
     return max(matches, key=lambda item: (item[0], item[1], item[2]))[3]
 
 
+def notes_candidate_strings(
+    rows: list[dict[str, Any]], registry: ModelIdentityRegistry
+) -> set[str]:
+    """Every string the notes matcher could resolve a section heading with.
+
+    Mirrors the three candidate classes model_judgment_notes_for_row tries per
+    row — identity_key (canonical model key or raw model), display, and raw
+    model — but drawn from the registry plus the whole log, so a section is
+    only called unreachable when NO model this install knows about could ever
+    surface it, not merely none in the current filtered view.
+    """
+    candidates: set[str] = set()
+    for (engine, model_key), identity in registry.identities.items():
+        candidates.add(model_key)
+        candidates.add(identity.model_display)
+        candidates.add(model_log_text(getattr(identity, "canonical_model_key", "") or ""))
+    candidates.update(registry.defaults.values())
+    for row in rows:
+        candidates.add(model_log_text(row.get("model")))
+        candidates.add(model_log_text(row.get("reported_model")))
+    return {candidate for candidate in candidates if candidate}
+
+
+def write_only_note_sections(
+    notes_sections: dict[str, list[str]], candidates: set[str]
+) -> list[tuple[str, int]]:
+    """Sections whose dated bullets can never surface on a scoreboard row.
+
+    The notes matcher resolves a row's notes by finding a model id in a
+    section HEADING, so a dated bullet under '## run ...' or an engine-only
+    heading like '## codex (...)' is write-only: it reads as filed evidence
+    but reaches no Notes column. Found live 2026-07-29 — gpt-5.6-sol's
+    scoreboard note was stuck on 2026-07-15 while three newer entries,
+    including a scoreboard correction, sat invisible. The file's own "How to
+    add a row" instructions steer authors into this, and every author to date
+    has followed them into it, which is why the gap gets NAMED rather than
+    guessed at: sections like 'Process lessons (cross-model)' may be
+    write-only on purpose, and only the author knows.
+
+    Reuses model_judgment_notes per candidate so the verdict cannot drift
+    from the real matcher's semantics.
+    """
+    orphans: list[tuple[str, int]] = []
+    for heading, bullets in notes_sections.items():
+        if not bullets:
+            continue
+        section = {heading: bullets}
+        if any(model_judgment_notes(candidate, section) for candidate in candidates):
+            continue
+        orphans.append((heading, len(bullets)))
+    return orphans
+
+
 def model_judgment_notes_for_row(
     row: dict[str, Any], notes_sections: dict[str, list[str]]
 ) -> list[str]:
@@ -8261,6 +8314,22 @@ def run_models_command(config: AppConfig, args: argparse.Namespace) -> int:
         )
     catalog_models = catalog_models_from_db if using_db else load_catalog_snapshot(catalog_path)
     notes_sections = parse_model_notes_sections(notes_path)
+    orphaned_sections = write_only_note_sections(
+        notes_sections, notes_candidate_strings(rows, identity_registry)
+    )
+    if orphaned_sections:
+        orphan_notes = sum(count for _, count in orphaned_sections)
+        shown = "; ".join(f"'{heading}'" for heading, _ in orphaned_sections[:3])
+        more = f"; +{len(orphaned_sections) - 3} more" if len(orphaned_sections) > 3 else ""
+        # stderr so --json stdout stays parseable; one line per invocation,
+        # not per row — a report of fact, not a nag.
+        print(
+            f"models: {orphan_notes} dated note(s) under {len(orphaned_sections)} MODEL-NOTES "
+            f"heading(s) match no known model and surface on no scoreboard row: {shown}{more}. "
+            "The notes matcher resolves model ids in HEADINGS — file dated bullets under a "
+            "heading containing the model id (e.g. '## gpt-5.6-sol (codex)').",
+            file=sys.stderr,
+        )
     groups = enrich_model_groups_with_notes(
         enrich_model_groups_with_identity(
             aggregate_model_log_rows(rows, task_type=args.task_type, model=args.model),

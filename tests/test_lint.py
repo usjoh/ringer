@@ -11,7 +11,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from ringer import Manifest, TaskSpec, Verifier, lint_manifest  # noqa: E402
+from ringer import (  # noqa: E402
+    AppConfig,
+    ArtifactConfig,
+    EngineConfig,
+    EvalConfig,
+    Manifest,
+    TaskSpec,
+    Verifier,
+    lint_manifest,
+)
 
 
 LONG_SPEC = (
@@ -557,6 +566,179 @@ class LintManifestTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("missing expected files", result.raw_output_excerpt)
         self.assertNotIn("the check PASSED", result.raw_output_excerpt)
+
+    def w12_config(self) -> AppConfig:
+        """A config with one write-confined engine and one opaque one.
+
+        'codex' mirrors the real config's workspace-write sandbox; 'opencode'
+        mirrors the wrapper-script engine whose confinement is invisible from
+        config — the rule must stay silent for it rather than guess.
+        """
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: None)
+        return AppConfig(
+            path=None,
+            identity_default=None,
+            state_dir=root,
+            dashboard_port_base=8787,
+            hud_port=8700,
+            hud_app_path=None,
+            allow_full_access=False,
+            eval=EvalConfig(backend="jsonl", jsonl_path=root / "eval.jsonl"),
+            engines={
+                "codex": EngineConfig(
+                    name="codex",
+                    bin="codex",
+                    args_template=("exec", "{spec}"),
+                    full_access_args=("--dangerously-bypass-approvals-and-sandbox",),
+                    sandbox_args=("--sandbox", "workspace-write"),
+                ),
+                "opencode": EngineConfig(
+                    name="opencode",
+                    bin="opencode-sandboxed.sh",
+                    args_template=("run", "{spec}"),
+                    full_access_args=("--no-sandbox",),
+                    sandbox_args=(),
+                ),
+            },
+            artifact=ArtifactConfig(
+                enabled=False,
+                out_template=str(root / "{run_id}.html"),
+                report_template=str(root / "{run_id}-report.html"),
+                index_out=root / "index.html",
+            ),
+        )
+
+    def w12_findings(self, task_extra: dict[str, object], expect_files: list[str]) -> list[str]:
+        task = self.task(expect_files=expect_files)
+        task.update(task_extra)
+        manifest = self.manifest([task])
+        return [
+            item
+            for item in lint_manifest(manifest, config=self.w12_config())
+            if "sandbox confines worker writes" in item
+        ]
+
+    def test_w12_sandboxed_deliverable_outside_taskdir_warns(self) -> None:
+        # The cttc-idea-join-notif round-1 shape (2026-07-28): an adversarial
+        # reviewer on sandboxed codex, told to deliver its report under
+        # ~/.ringer/exports/, an opaque script check that never names the path
+        # in the manifest. The worker wrote an 11KB review in its taskdir and
+        # physically could not deliver it; two attempts, 251k tokens, both
+        # failed identically.
+        findings = self.w12_findings(
+            {"engine": "codex", "check": "bash /work/check_review.sh"},
+            ["/exports/cttc/review-r1.md"],
+        )
+        self.assertEqual(1, len(findings), findings)
+        # A warning, not a blocker: the check-exports design is legitimate and
+        # an opaque script MIGHT implement it — the author confirms, lint
+        # cannot.
+        self.assertFalse(findings[0].startswith("ERROR:"), findings[0])
+        self.assertIn("/exports/cttc/review-r1.md", findings[0])
+
+    def test_w12_check_naming_the_path_is_the_export_pattern(self) -> None:
+        # Rounds 2/3 of the same review chain passed by having the CHECK do
+        # the export — checks run unsandboxed. A check that names the path is
+        # taken as that design.
+        findings = self.w12_findings(
+            {
+                "engine": "codex",
+                "check": (
+                    "cp review.md /exports/cttc/review-r2.md && test -s /exports/cttc/review-r2.md "
+                    "|| { echo 'FAIL: export missing'; exit 1; }"
+                ),
+            },
+            ["/exports/cttc/review-r2.md"],
+        )
+        self.assertEqual([], findings)
+
+    def test_w12_absolute_path_inside_the_taskdir_is_quiet(self) -> None:
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        workdir = (Path(temp_dir.name) / "work").resolve()
+        manifest = Manifest.from_obj(
+            {
+                "run_name": "lint-test",
+                "workdir": str(workdir),
+                "max_parallel": 1,
+                "tasks": [
+                    {
+                        **self.task(expect_files=[str(workdir / "one" / "report.md")]),
+                        "engine": "codex",
+                    }
+                ],
+            }
+        )
+        findings = [
+            item
+            for item in lint_manifest(manifest, config=self.w12_config())
+            if "sandbox confines worker writes" in item
+        ]
+        self.assertEqual([], findings)
+
+    def test_w12_full_access_task_is_quiet(self) -> None:
+        findings = self.w12_findings(
+            {"engine": "codex", "check": "bash /work/check.sh", "full_access": True},
+            ["/exports/cttc/review-r1.md"],
+        )
+        self.assertEqual([], findings)
+
+    def test_w12_unconfined_engine_is_quiet(self) -> None:
+        # opencode's confinement lives in its wrapper script, invisible from
+        # config. Warning on a guess trains authors to ignore the warning.
+        findings = self.w12_findings(
+            {"engine": "opencode", "check": "bash /work/check.sh"},
+            ["/exports/cttc/review-r1.md"],
+        )
+        self.assertEqual([], findings)
+
+    def test_w12_no_config_is_silent(self) -> None:
+        # Plain `ringer.py lint` may run with no loadable config; the rule
+        # degrades to silence rather than blocking lint entirely.
+        task = self.task(expect_files=["/exports/cttc/review-r1.md"])
+        task.update({"engine": "codex", "check": "bash /work/check_review.sh"})
+        manifest = self.manifest([task])
+        findings = [
+            item for item in lint_manifest(manifest) if "sandbox confines worker writes" in item
+        ]
+        self.assertEqual([], findings)
+
+    def test_w12_tilde_declaration_matches_expanded_form_in_check(self) -> None:
+        # Verifier expands ~ in expect_files, and a check exporting the file
+        # names the EXPANDED path ($HOME already substituted). The suppression
+        # must compare expanded forms or this legitimate pairing false-warns.
+        home_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(home_dir.cleanup)
+        previous_home = os.environ.get("HOME")
+        os.environ["HOME"] = home_dir.name
+        try:
+            expanded = Path(home_dir.name) / "exports" / "review-r2.md"
+            findings = self.w12_findings(
+                {
+                    "engine": "codex",
+                    "check": (
+                        f"cp review.md {expanded} && test -s {expanded} "
+                        "|| { echo 'FAIL: export missing'; exit 1; }"
+                    ),
+                },
+                ["~/exports/review-r2.md"],
+            )
+        finally:
+            if previous_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = previous_home
+        self.assertEqual([], findings)
+
+    def test_w12_tilde_deliverable_counts_as_outside(self) -> None:
+        # The real incident declared the path under ~/.ringer/exports/ — a
+        # tilde form must warn exactly like its expanded absolute form.
+        findings = self.w12_findings(
+            {"engine": "codex", "check": "bash /work/check_review.sh"},
+            ["~/ringer-exports/review-r1.md"],
+        )
+        self.assertEqual(1, len(findings), findings)
 
     def test_templates_are_clean(self) -> None:
         # Every kit ships one or more manifest skeletons (manifest.json plus

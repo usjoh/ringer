@@ -1228,6 +1228,7 @@ def lint_manifest(
                 )
 
     findings.extend(unreachable_deliverable_findings(manifest))
+    findings.extend(sandbox_unreachable_deliverable_findings(manifest, config))
 
     if not allow_noncanonical_route:
         findings.extend(
@@ -1505,6 +1506,68 @@ def unreachable_deliverable_findings(manifest: Manifest) -> list[str]:
                 "file while the task is still recorded FAIL and retried identically. "
                 "Declare the deliverable as that absolute path, or have the worker "
                 "write it into the task directory."
+            )
+    return findings
+
+
+def engine_confines_writes_to_taskdir(engine: "EngineConfig") -> bool:
+    """True when the engine's sandbox limits worker writes to the task dir.
+
+    Keyed on the codex CLI's "workspace-write" vocabulary because that is the
+    only sandbox whose write boundary is legible from config alone. opencode's
+    confinement lives inside its wrapper script, invisible from here — better
+    to stay silent than to warn from a guess.
+    """
+    return any("workspace-write" in arg for arg in engine.sandbox_args)
+
+
+def sandbox_unreachable_deliverable_findings(
+    manifest: Manifest, config: "AppConfig | None"
+) -> list[str]:
+    """Deliverables declared where the sandboxed worker cannot write.
+
+    The sibling of unreachable_deliverable_findings, for the opposite failure:
+    there the path contract disagreed with where verification looks; here the
+    contract is consistent but points OUTSIDE the worker's writable surface,
+    so the worker does the work and physically cannot deliver it. Three runs
+    hit this in two days (2026-07-27/28): two harness-audit lanes spec'd to
+    create `.codex/` inside the worktree (the codex sandbox hard-blocks it),
+    and a cttc review lane told to write its report under ~/.ringer/exports/
+    — two attempts, 251k tokens, both failed with an 11KB review sitting
+    finished in the taskdir.
+
+    A warning, not an ERROR: rounds 2/3 of the same review chain passed by
+    having the CHECK do the export — checks run unsandboxed, so a deliverable
+    outside the taskdir is legitimate exactly when the check produces it. When
+    the check names the path we assume that design and stay quiet; an opaque
+    check (a bare script call) still warns, telling the author to confirm.
+    """
+    if config is None:
+        return []
+    findings: list[str] = []
+    for task in manifest.tasks:
+        if task.full_access:
+            continue
+        engine = config.engines.get(task.engine)
+        if engine is None or not engine_confines_writes_to_taskdir(engine):
+            continue
+        taskdir = (manifest.workdir / task.key).resolve()
+        for rel in task.expect_files:
+            if is_relative_expect_file(rel):
+                continue
+            written = Path(rel).expanduser()
+            resolved = resolve_for_compare(written)
+            if resolved == taskdir or taskdir in resolved.parents:
+                continue
+            # The check names the path — the check-exports pattern.
+            if any(form in task.check for form in (rel, str(written), str(resolved))):
+                continue
+            findings.append(
+                f"{task.key}: deliverable {rel} is outside the task directory, and "
+                f"{task.engine}'s sandbox confines worker writes to the task directory — "
+                "the worker cannot create it there. Have the CHECK export it (checks run "
+                "unsandboxed), or the task fails with the work complete and the retry "
+                "fails identically."
             )
     return findings
 
@@ -10410,8 +10473,15 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "lint":
             manifest = Manifest.from_path(args.manifest)
+            # Best-effort: the sandbox-reachability rule needs engine config,
+            # and authors lint BEFORE they run. lint must still work with no
+            # config at all, so a failed load silently degrades to config=None.
+            lint_config: AppConfig | None = None
+            with contextlib.suppress(Exception):
+                lint_config = AppConfig.load(args.config)
             findings = lint_manifest(
                 manifest,
+                config=lint_config,
                 allow_noncanonical_route=args.allow_noncanonical_route,
             )
             if findings:

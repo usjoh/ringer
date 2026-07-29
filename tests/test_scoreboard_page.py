@@ -26,9 +26,12 @@ from ringer import (  # noqa: E402
     artifact_live_path,
     lint_manifest,
     model_judgment_notes,
+    notes_candidate_strings,
     parse_model_notes_sections,
     run_models_command,
+    write_only_note_sections,
 )
+from ringer import ModelIdentityRegistry  # noqa: E402
 
 
 def catalog_model(model_id: str, *, prompt: str, completion: str, ctx: int = 64000) -> dict[str, object]:
@@ -494,6 +497,114 @@ class ScoreboardPageTests(unittest.TestCase):
             "manifest: run_name model-scoreboard is reserved for the scoreboard page.",
             lint_manifest(manifest),
         )
+
+
+
+
+class WriteOnlyNotesTests(unittest.TestCase):
+    """Sections whose dated bullets can never surface on a scoreboard row."""
+
+    def empty_registry(self) -> ModelIdentityRegistry:
+        return ModelIdentityRegistry(
+            identities={}, defaults={}, engine_meta={}, noncanonical_routes={}
+        )
+
+    def test_unmatched_dated_section_is_reported_with_its_note_count(self) -> None:
+        sections = {
+            "run cttc-idea-join-notif, 2026-07-28 (6 rounds)": [
+                "- 2026-07-28 note one",
+                "- 2026-07-28 note two",
+            ],
+        }
+        candidates = notes_candidate_strings(
+            [{"model": "gpt-5.6-sol"}], self.empty_registry()
+        )
+        self.assertEqual(
+            [("run cttc-idea-join-notif, 2026-07-28 (6 rounds)", 2)],
+            write_only_note_sections(sections, candidates),
+        )
+
+    def test_heading_containing_a_known_model_id_is_reachable(self) -> None:
+        sections = {
+            "gpt-5.6-sol (codex)": ["- 2026-07-28 surfaced note"],
+            "glm-5.2 via opencode (`openrouter/z-ai/glm-5.2`)": ["- 2026-07-18 surfaced note"],
+        }
+        candidates = notes_candidate_strings(
+            [{"model": "gpt-5.6-sol"}, {"model": "openrouter/z-ai/glm-5.2"}],
+            self.empty_registry(),
+        )
+        self.assertEqual([], write_only_note_sections(sections, candidates))
+
+    def test_sections_without_dated_bullets_are_not_reported(self) -> None:
+        # parse_model_notes_sections keeps only dated bullets; a heading with
+        # none holds no evidence, so calling it write-only is just noise.
+        sections = {"Process lessons (cross-model)": []}
+        self.assertEqual(
+            [], write_only_note_sections(sections, {"gpt-5.6-sol"})
+        )
+
+    def test_verdict_reuses_the_real_matcher_semantics(self) -> None:
+        # 'codex' is an engine name, not a model id — the exact miss that left
+        # gpt-5.6-sol's scoreboard note stuck on 2026-07-15 while newer
+        # entries at the top of '## codex' sat invisible.
+        sections = {"codex (GPT-5-class, own harness)": ["- 2026-07-28 invisible note"]}
+        candidates = notes_candidate_strings(
+            [{"model": "gpt-5.6-sol"}], self.empty_registry()
+        )
+        self.assertEqual(
+            [("codex (GPT-5-class, own harness)", 1)],
+            write_only_note_sections(sections, candidates),
+        )
+
+
+class WriteOnlyNotesCommandTests(unittest.TestCase):
+    """The models command reports write-only sections once, on stderr.
+
+    Borrows ScoreboardPageTests' fixtures without subclassing it — inheriting
+    would re-run every scoreboard test under this class's name.
+    """
+
+    setUp = ScoreboardPageTests.setUp
+    restore_env = ScoreboardPageTests.restore_env
+    write_fixtures = ScoreboardPageTests.write_fixtures
+    args = ScoreboardPageTests.args
+
+    def run_models_capture(self) -> tuple[str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(0, run_models_command(self.config, self.args()))
+        return out.getvalue(), err.getvalue()
+
+    def test_write_only_sections_are_reported_once_on_stderr(self) -> None:
+        self.notes_path.write_text(
+            """# Notes
+
+## Proven lane (`openrouter/proven`)
+- 2026-07-06 surfaced note.
+
+## run some-swarm, 2026-07-28 (6 rounds)
+- 2026-07-28 stranded note one.
+- 2026-07-28 stranded note two.
+""",
+            encoding="utf-8",
+        )
+        stdout, stderr = self.run_models_capture()
+        self.assertIn("match no known model and surface on no scoreboard row", stderr)
+        self.assertIn("run some-swarm, 2026-07-28 (6 rounds)", stderr)
+        self.assertIn("2 dated note(s) under 1 MODEL-NOTES heading(s)", stderr)
+        self.assertNotIn("match no known model", stdout, "warning must not pollute stdout")
+
+    def test_fully_reachable_notes_file_stays_silent(self) -> None:
+        self.notes_path.write_text(
+            """# Notes
+
+## Proven lane (`openrouter/proven`)
+- 2026-07-06 surfaced note.
+""",
+            encoding="utf-8",
+        )
+        _, stderr = self.run_models_capture()
+        self.assertNotIn("match no known model", stderr)
 
 
 if __name__ == "__main__":

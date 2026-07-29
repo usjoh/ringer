@@ -547,3 +547,26 @@ the fix and used the engine_args splice; later runs should use the `model` field
   frontmatter line-shape explicitly; (3) two tightened checks initially false-failed
   honest work ("corrected ON 2026-07-17", a prose cross-reference counted as a
   duplicated section) — strict-on-substance/tolerant-on-format cuts both ways.
+
+## run cttc-idea-join-notif, 2026-07-28 (code-feature + code-review, live Apps Script family board, 6 rounds)
+- **gpt-5.6-sol (codex, medium effort): 3/3 first-try on code-feature/code-fix** (impl 49.5k tok/108s;
+  five-finding fix round 40k/81s; N1 lock restructure 43.5k/86s). Every fix landed exactly per the
+  reviewer's minimal-concrete-edit blocks including comment placement. Medium stays the build lane.
+- **gpt-5.6-sol (codex, high effort): earned its review tier again.** r1 NO-SHIP with 5 findings ALL
+  reproduced by throwaway fixtures (incl. a minor-recipient gap the spec's own invariant demanded and a
+  quota-arithmetic case tied to that night's planned family nudge); r2 caught a NEW HIGH the fix round
+  introduced (script lock held across sendEmail → silent family-write loss, proven via instrumented
+  LockService stub); r3 verified the replacement design with zero-violation lock-state evidence and an
+  explicit trade judgment. 105k/73k tokens for r2/r3. This is what high is FOR: last-gate review of
+  live-user deploys.
+- **SCOREBOARD CORRECTION — two recorded FAILs on Sol's code-review cell (r1, attempts 1+2) are
+  failure_class=orchestrator, not model.** My review manifest demanded the report at an absolute path
+  outside the sandbox's writable roots (workspace-write covers [workdir,/tmp,$TMPDIR] only) and passed
+  no writable_roots override; the worker's reports were substance-complete BOTH attempts and were
+  harvested from the taskdir. Same defect class as harness-audit-remediation r1 (2026-07-28, earlier
+  same day — the lesson was already in the session record and I reproduced it anyway). Do not read
+  Sol's code-review first-try rate at face value until these rows are discounted.
+- **Check-craft:** (1) absolute-path deliverables from sandboxed workers need writable_roots, or use
+  a RELATIVE taskdir deliverable + harvest-in-check (checks run outside the sandbox — the pattern that
+  fixed r2/r3 here); (2) grep -E with \| alternation silently matches nothing — two false
+  "risk-area-unaddressed" FAILs in my r1 check were this; lint can't catch your check's own regexes.

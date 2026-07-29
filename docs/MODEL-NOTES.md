@@ -406,6 +406,7 @@ checks and raw logs support — no vibes, no worker self-reports.
 - Both fixture-based checks passed while hiding 2 real-substrate bugs (EXIT-trap lock cleanup deleting a live lock; tilde-expansion in ${var#~/} — fixture used absolute paths). Codex not at fault; checks were fixture-only. Lesson: for ops scripts, add one real-repo scenario to the check or budget an acceptance pass after integration.
 
 ## gpt-5.6-sol (codex)
+- 2026-07-28 (meridian, cttc-idea-join-notif — live Apps Script family board, 6 rounds): medium effort 3/3 first-try on code-feature/code-fix (impl 49.5k tok/108s; five-finding fix round 40k/81s; N1 lock restructure 43.5k/86s) — every fix landed exactly per the reviewer's minimal-concrete-edit blocks including comment placement; medium stays the build lane. High effort earned its review tier again: r1 NO-SHIP with 5 findings ALL reproduced by throwaway fixtures (incl. a minor-recipient gap the spec's own invariant demanded and a quota-arithmetic case tied to that night's planned family nudge); r2 caught a NEW HIGH the fix round introduced (script lock held across sendEmail → silent family-write loss, proven via instrumented LockService stub); r3 verified the replacement design with zero-violation lock-state evidence and an explicit trade judgment (105k/73k tokens for r2/r3). This is what high is FOR: last-gate review of live-user deploys. SCOREBOARD CORRECTION: two recorded FAILs on Sol's code-review cell (r1, attempts 1+2) are orchestrator-class, not model — the rows are STAMPED failure_class=model and this note is the correction. The review manifest demanded the report at an absolute path outside the sandbox's writable roots (workspace-write covers [workdir,/tmp,$TMPDIR] only) and passed no writable_roots override; the worker's reports were substance-complete BOTH attempts and were harvested from the taskdir. Same defect class as harness-audit-remediation r1 earlier the same day — the lesson was already in the session record and was reproduced anyway. Do not read Sol's code-review first-try rate at face value until these rows are discounted. Check-craft: (1) absolute-path deliverables from sandboxed workers need writable_roots, or use a RELATIVE taskdir deliverable + harvest-in-check (checks run outside the sandbox — the pattern that fixed r2/r3 here); (2) grep -E with \| alternation silently matches nothing — two false "risk-area-unaddressed" FAILs in the r1 check were this; lint cannot catch your check's own regexes.
 - 2026-07-15 ringer-self-update run (3 serial tasks, direct-repo-edit mode): code-fix baseline-test repair 1/1 first-try (61k tokens, 1.6m); code-feature self-update mechanism (git fetch/ff-pull/re-exec + HUD staleness restart + 20-test suite) 1/1 first-try at high effort (153k, 8.1m); code-feature signal-contract (all 3 scoreboard surfaces + canonical-route lint enforcement) passed on retry (358k, 13.7m) — attempt 1 died on stale old-column assertions in pre-existing tests it hadn't finished updating; the retry prompt's injected FAIL list was enough to close it out. Lesson: when a task rewrites a display contract, name every test file asserting the old contract in the spec's ownership list AND tell it to update them FIRST.
 - 2026-07-09 code-feature/code-fix (ringside-overhaul): 4/4 first-try — a ringer.py logging change with tests, a 265-line stdlib backfill CLI (atomic rewrite, dry-run, idempotence all check-verified), a ~1500-line single-file HTML redesign (running-now pills + worker-card grid + multi-expansion refactor, 30KB patch, node --check + contract greps + unittest), and a render-gating change where it correctly UPDATED tests asserting the old behavior instead of gaming the check. Medium/high reasoning, 65–120k tokens/task.
 - Same day, different session (bench-harness-patches, code-fix): 0.29 first-try over 7 tasks on a Next.js/Turbopack harness. Spec and check quality dominate model choice — see the scoreboard before generalizing either number.
@@ -548,25 +549,3 @@ the fix and used the engine_args splice; later runs should use the `model` field
   honest work ("corrected ON 2026-07-17", a prose cross-reference counted as a
   duplicated section) — strict-on-substance/tolerant-on-format cuts both ways.
 
-## run cttc-idea-join-notif, 2026-07-28 (code-feature + code-review, live Apps Script family board, 6 rounds)
-- **gpt-5.6-sol (codex, medium effort): 3/3 first-try on code-feature/code-fix** (impl 49.5k tok/108s;
-  five-finding fix round 40k/81s; N1 lock restructure 43.5k/86s). Every fix landed exactly per the
-  reviewer's minimal-concrete-edit blocks including comment placement. Medium stays the build lane.
-- **gpt-5.6-sol (codex, high effort): earned its review tier again.** r1 NO-SHIP with 5 findings ALL
-  reproduced by throwaway fixtures (incl. a minor-recipient gap the spec's own invariant demanded and a
-  quota-arithmetic case tied to that night's planned family nudge); r2 caught a NEW HIGH the fix round
-  introduced (script lock held across sendEmail → silent family-write loss, proven via instrumented
-  LockService stub); r3 verified the replacement design with zero-violation lock-state evidence and an
-  explicit trade judgment. 105k/73k tokens for r2/r3. This is what high is FOR: last-gate review of
-  live-user deploys.
-- **SCOREBOARD CORRECTION — two recorded FAILs on Sol's code-review cell (r1, attempts 1+2) are
-  failure_class=orchestrator, not model.** My review manifest demanded the report at an absolute path
-  outside the sandbox's writable roots (workspace-write covers [workdir,/tmp,$TMPDIR] only) and passed
-  no writable_roots override; the worker's reports were substance-complete BOTH attempts and were
-  harvested from the taskdir. Same defect class as harness-audit-remediation r1 (2026-07-28, earlier
-  same day — the lesson was already in the session record and I reproduced it anyway). Do not read
-  Sol's code-review first-try rate at face value until these rows are discounted.
-- **Check-craft:** (1) absolute-path deliverables from sandboxed workers need writable_roots, or use
-  a RELATIVE taskdir deliverable + harvest-in-check (checks run outside the sandbox — the pattern that
-  fixed r2/r3 here); (2) grep -E with \| alternation silently matches nothing — two false
-  "risk-area-unaddressed" FAILs in my r1 check were this; lint can't catch your check's own regexes.

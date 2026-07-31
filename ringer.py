@@ -64,6 +64,12 @@ SELF_UPDATE_FETCH_TIMEOUT_S = 10
 SELF_UPDATE_STATE_FILE = "self-update.json"
 DEFAULT_TOKEN_REGEX = r"tokens\s+used\s*:?\s*([0-9][0-9,]*)"
 DEFAULT_CODEX_MODEL_REPORT_REGEX = r"(?m)^model:[ \t]*([^ \t\r\n]+)[ \t]*\r?$"
+# Harnesses announce their model in a banner at startup, but the capture buffer
+# the banner is scraped from keeps only the TAIL of a worker's output. A long
+# run therefore scrolls its own identity out of the buffer before anyone reads
+# it. Retaining the first bytes too costs nothing and is the only thing that
+# makes attribution independent of how much the worker went on to say.
+WORKER_HEAD_CAPTURE_BYTES = 64 * 1024
 ACTIVITY_TAIL_BYTES = 2048
 ACTIVITY_TEXT_LIMIT = 80
 ARTIFACT_WRAPPER_TAIL_BYTES = 256 * 1024
@@ -1875,6 +1881,7 @@ def lint_manifest(
 
     findings.extend(unreachable_deliverable_findings(manifest))
     findings.extend(sandbox_unreachable_deliverable_findings(manifest, config))
+    findings.extend(unpinned_model_findings(manifest, config))
 
     if not allow_noncanonical_route:
         findings.extend(
@@ -2215,6 +2222,46 @@ def sandbox_unreachable_deliverable_findings(
                 "unsandboxed), or the task fails with the work complete and the retry "
                 "fails identically."
             )
+    return findings
+
+
+def unpinned_model_findings(
+    manifest: Manifest, config: "AppConfig | None"
+) -> list[str]:
+    """Tasks whose engine will pick a model that nothing here records.
+
+    An engine template with the OPTIONAL {model_args} placeholder drops the
+    flag entirely when no model is pinned, so the harness silently falls back
+    to its own configured default. The work is fine; the eval row is not. The
+    model column ends up empty and the attempt lands under '(unattributed
+    legacy rows)' in ./ringer.py models — invisible to routing forever, since
+    the default in force at run time is not recorded anywhere and cannot be
+    reconstructed afterwards.
+
+    A warning, not an ERROR: the run itself is legitimate and blocking it
+    would be wrong. This only fires where an author gets no other signal —
+    the required-{model} form already raises in validate_manifest_engines.
+    """
+    if config is None:
+        return []
+    findings: list[str] = []
+    for task in manifest.tasks:
+        engine = config.engines.get(task.engine)
+        if engine is None:
+            continue
+        if any("{model}" in item for item in engine.args_template):
+            continue  # already a hard error when unpinned
+        if "{model_args}" not in engine.args_template:
+            continue  # engine takes no model at all; nothing to pin
+        if task.model or engine.model_default:
+            continue
+        findings.append(
+            f"{task.key}: no model pinned and engines.{task.engine}.model_default is "
+            f"unset, so {task.engine} will quietly use its own default and the eval row "
+            "records no model. Set the task's \"model\" field or "
+            f"engines.{task.engine}.model_default in config.toml — an unattributed "
+            "attempt cannot be recovered later."
+        )
     return findings
 
 
@@ -9559,7 +9606,9 @@ class RingerRunner:
             f"[ringer.py] engine: {runtime.task.engine}\n"
             f"[ringer.py] command: {shell_command_for_display(display_cmd)} < /dev/null\n",
         )
-        capture = RollingBytes(max_bytes=1_000_000)
+        capture = RollingBytes(
+            max_bytes=1_000_000, head_bytes=WORKER_HEAD_CAPTURE_BYTES
+        )
         try:
             log_fh = log_path.open("ab")
         except OSError as exc:
@@ -9603,7 +9652,13 @@ class RingerRunner:
             self.active_processes.pop(proc.pid, None)
         output_tail = capture.text()
         tokens = parse_token_count(output_tail, engine.token_regex)
-        reported_model = parse_reported_model(output_tail, engine.model_report_regex)
+        # Tail first so a run that resolves today resolves identically; the head
+        # only ever fills in an answer that was previously lost. Token counts
+        # need no such fallback — harnesses report those when they finish, so
+        # they are in the tail by construction.
+        reported_model = parse_reported_model(
+            output_tail, engine.model_report_regex
+        ) or parse_reported_model(capture.head_text(), engine.model_report_regex)
         if timed_out:
             append_text(log_path, f"\n[ringer.py] worker timed out after {runtime.task.timeout_s}s\n")
         append_text(log_path, f"[ringer.py] attempt {attempt} exited rc={proc.returncode}\n")
@@ -9812,11 +9867,23 @@ class RingerRunner:
 
 
 class RollingBytes:
-    def __init__(self, max_bytes: int) -> None:
+    """A bounded tail of a stream, optionally keeping a bounded head as well.
+
+    The head exists for one-shot banners a harness prints before it starts
+    working: they are gone from the tail the moment the worker outruns
+    max_bytes, and nothing downstream can tell that apart from a harness that
+    never announced itself.
+    """
+
+    def __init__(self, max_bytes: int, head_bytes: int = 0) -> None:
         self.max_bytes = max_bytes
+        self.head_bytes = head_bytes
         self.data = bytearray()
+        self.head = bytearray()
 
     def extend(self, chunk: bytes) -> None:
+        if len(self.head) < self.head_bytes:
+            self.head.extend(chunk[: self.head_bytes - len(self.head)])
         self.data.extend(chunk)
         overflow = len(self.data) - self.max_bytes
         if overflow > 0:
@@ -9824,6 +9891,9 @@ class RollingBytes:
 
     def text(self) -> str:
         return bytes(self.data).decode("utf-8", errors="replace")
+
+    def head_text(self) -> str:
+        return bytes(self.head).decode("utf-8", errors="replace")
 
 
 class AsyncFileCloser:

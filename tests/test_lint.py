@@ -740,6 +740,90 @@ class LintManifestTests(unittest.TestCase):
         )
         self.assertEqual(1, len(findings), findings)
 
+    def w13_config(self, *, model_default: str = "") -> AppConfig:
+        """Engines covering all three model-pinning shapes.
+
+        'codex' is the built-in optional form ({model_args}), the one that
+        drops the flag and loses attribution in silence. 'pinned' requires a
+        model, so validate_manifest_engines already refuses it unpinned and
+        this rule must not double-report. 'modelless' takes none at all.
+        """
+        root = Path(tempfile.mkdtemp())
+        base = self.w12_config()
+        return AppConfig(
+            path=None,
+            identity_default=None,
+            state_dir=root,
+            dashboard_port_base=8787,
+            hud_port=8700,
+            hud_app_path=None,
+            allow_full_access=False,
+            eval=EvalConfig(backend="jsonl", jsonl_path=root / "eval.jsonl"),
+            engines={
+                "codex": EngineConfig(
+                    name="codex",
+                    bin="codex",
+                    args_template=("exec", "{model_args}", "{spec}"),
+                    full_access_args=(),
+                    sandbox_args=("--sandbox", "workspace-write"),
+                    model_default=model_default,
+                ),
+                "pinned": EngineConfig(
+                    name="pinned",
+                    bin="pinned",
+                    args_template=("exec", "-m", "{model}", "{spec}"),
+                    full_access_args=(),
+                    sandbox_args=(),
+                ),
+                "modelless": EngineConfig(
+                    name="modelless",
+                    bin="modelless",
+                    args_template=("run", "{spec}"),
+                    full_access_args=(),
+                    sandbox_args=(),
+                ),
+            },
+            artifact=base.artifact,
+        )
+
+    def w13_findings(
+        self, task_extra: dict[str, object], *, model_default: str = ""
+    ) -> list[str]:
+        task = self.task()
+        task.update(task_extra)
+        manifest = self.manifest([task])
+        return [
+            item
+            for item in lint_manifest(manifest, config=self.w13_config(model_default=model_default))
+            if "no model pinned" in item
+        ]
+
+    def test_w13_unpinned_optional_model_engine_warns(self) -> None:
+        # The observer-triad shape (2026-07-29..31): a config with no
+        # [engines.codex] section at all, so no -m reaches the worker and 15
+        # attempts over 1MB of output logged no model at all.
+        findings = self.w13_findings({"engine": "codex"})
+        self.assertEqual(1, len(findings), findings)
+        self.assertIn("engines.codex.model_default is unset", findings[0])
+
+    def test_w13_task_model_or_engine_default_is_clean(self) -> None:
+        self.assertEqual([], self.w13_findings({"engine": "codex", "model": "gpt-5.6-sol"}))
+        self.assertEqual([], self.w13_findings({"engine": "codex"}, model_default="gpt-5.6-sol"))
+
+    def test_w13_does_not_double_report_the_hard_error_form(self) -> None:
+        # A required {model} unpinned is already a ValueError in
+        # validate_manifest_engines; warning here too would just be noise.
+        self.assertEqual([], self.w13_findings({"engine": "pinned"}))
+
+    def test_w13_silent_for_engines_that_take_no_model(self) -> None:
+        self.assertEqual([], self.w13_findings({"engine": "modelless"}))
+
+    def test_w13_is_a_warning_not_a_blocking_error(self) -> None:
+        # `run` blocks only on ERROR:-prefixed findings. The run is legitimate;
+        # only its provenance is lost, so it must still be allowed to proceed.
+        findings = self.w13_findings({"engine": "codex"})
+        self.assertFalse(findings[0].startswith("ERROR:"), findings[0])
+
     def test_templates_are_clean(self) -> None:
         # Every kit ships one or more manifest skeletons (manifest.json plus
         # optional manifest-round*.json for multi-round kits).

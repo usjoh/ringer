@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import io
 import json
 import os
 import sqlite3
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 from ringer import (
+    DEFAULT_CODEX_MODEL_REPORT_REGEX,
+    DEFAULT_TOKEN_REGEX,
     AppConfig,
     ArtifactConfig,
     EngineConfig,
     EvalConfig,
     Manifest,
     RingerRunner,
+    RollingBytes,
     VerifyResult,
     WorkerResult,
     build_models_api_payload,
@@ -104,6 +109,70 @@ access = "OpenRouter API"
         engine = load_engines(None)["codex"]
         output = "OpenAI Codex v0.144.0\n--------\nmodel: gpt-5.6-sol\nprovider: openai\n"
         self.assertEqual("gpt-5.6-sol", parse_reported_model(output, engine.model_report_regex))
+
+    def test_head_capture_keeps_a_banner_the_tail_has_dropped(self) -> None:
+        capture = RollingBytes(max_bytes=1024, head_bytes=256)
+        capture.extend(b"model: gpt-5.6-sol\n")
+        capture.extend(b"x" * 4096)
+        self.assertNotIn("model:", capture.text())
+        self.assertIn("model: gpt-5.6-sol", capture.head_text())
+
+    def test_worker_is_attributed_after_outrunning_the_capture_buffer(self) -> None:
+        """The banner is printed once, then buried under megabytes of work.
+
+        Driven through the real _run_worker so the fallback is proven where it
+        actually has to fire: scraping the head in isolation would pass just as
+        well with the call site left unchanged.
+        """
+        model = self.reported_model_for_worker(filler_bytes=2_000_000)
+        self.assertEqual("gpt-5.6-sol", model)
+
+    def test_short_worker_still_attributed_from_the_tail(self) -> None:
+        self.assertEqual("gpt-5.6-sol", self.reported_model_for_worker(filler_bytes=0))
+
+    def reported_model_for_worker(self, *, filler_bytes: int) -> str | None:
+        script = (
+            "import sys\n"
+            "sys.stdout.write('OpenAI Codex v0.144.0\\nmodel: gpt-5.6-sol\\n')\n"
+            f"sys.stdout.write('x' * {filler_bytes})\n"
+            "sys.stdout.write('\\ntokens used: 1234\\n')\n"
+        )
+        engine = EngineConfig(
+            name="codex",
+            bin=sys.executable,
+            args_template=("-c", script),
+            full_access_args=(),
+            sandbox_args=(),
+            model_default="gpt-5.6-sol",
+            token_regex=DEFAULT_TOKEN_REGEX,
+            model_report_regex=DEFAULT_CODEX_MODEL_REPORT_REGEX,
+        )
+        manifest = Manifest.from_obj(
+            {
+                "run_name": "head-capture",
+                "workdir": str(self.root / "headwork"),
+                "tasks": [
+                    {
+                        "key": "task",
+                        "spec": "Emit a banner and then a great deal of output.",
+                        "check": "true",
+                    }
+                ],
+            }
+        )
+        runner = RingerRunner(
+            manifest,
+            config=self.config(self.root / "head-runs.jsonl", engine),
+            identity="tester",
+            dashboard_enabled=False,
+        )
+        runtime = runner.runtimes[0]
+        runtime.taskdir.mkdir(parents=True, exist_ok=True)
+        runtime.log_path.parent.mkdir(parents=True, exist_ok=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            worker = asyncio.run(runner._run_worker(runtime, runtime.task.spec, 1))
+        self.assertEqual(0, worker.returncode)
+        return worker.reported_model
 
     def test_reported_model_wins_and_resolved_model_is_fallback(self) -> None:
         rows = self.log_attempts(

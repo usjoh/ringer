@@ -86,6 +86,50 @@ class LintManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"task key must be a string"):
             self.manifest([task])
 
+    def test_worktree_ref_defaults_to_head_and_round_trips(self) -> None:
+        self.assertEqual("HEAD", self.manifest([self.task()]).worktree_ref)
+        manifest = self.manifest([self.task()], worktrees=True)
+        self.assertEqual("HEAD", manifest.worktree_ref)
+        # with_max_parallel must carry the field — it rebuilds the manifest.
+        obj = {
+            "run_name": "ref-test",
+            "workdir": manifest.workdir.as_posix(),
+            "repo": str(manifest.repo),
+            "worktrees": True,
+            "worktree_ref": "bd61708d195d6535b716ec9a8b1974464848b214",
+            "tasks": [self.task()],
+        }
+        parsed = Manifest.from_obj(obj)
+        self.assertEqual("bd61708d195d6535b716ec9a8b1974464848b214", parsed.worktree_ref)
+        self.assertEqual(
+            "bd61708d195d6535b716ec9a8b1974464848b214",
+            parsed.with_max_parallel(4).worktree_ref,
+        )
+
+    def test_worktree_ref_requires_worktrees(self) -> None:
+        with self.assertRaisesRegex(ValueError, r"worktree_ref is set but worktrees is false"):
+            Manifest.from_obj(
+                {
+                    "run_name": "ref-test",
+                    "workdir": "/tmp/ref-test-work",
+                    "worktree_ref": "bd61708",
+                    "tasks": [self.task()],
+                }
+            )
+
+    def test_worktree_ref_must_be_a_string(self) -> None:
+        with self.assertRaisesRegex(ValueError, r"worktree_ref must be a string"):
+            Manifest.from_obj(
+                {
+                    "run_name": "ref-test",
+                    "workdir": "/tmp/ref-test-work",
+                    "worktrees": True,
+                    "repo": "/tmp",
+                    "worktree_ref": 123,
+                    "tasks": [self.task()],
+                }
+            )
+
     def test_w1_unverifiable_check(self) -> None:
         manifest = self.manifest([self.task(check="echo ok && echo done")])
         self.assertHasFinding(

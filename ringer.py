@@ -1727,6 +1727,14 @@ class Manifest:
     repo: Path | None
     tasks: tuple[TaskSpec, ...]
     source_path: Path | None = None
+    # The commit worktrees are created at. Defaults to HEAD, but a run whose
+    # candidate is anchored to an older immutable baseline can pin it here —
+    # worktree creation happens orchestrator-side, UNSANDBOXED, so this is the
+    # only place a non-HEAD base costs nothing. A sandboxed worker cannot
+    # `git checkout` inside its worktree (the shared .git/worktrees metadata
+    # is outside its writable surface), and the workaround it is forced into
+    # (cloning the repo into its own taskdir) burns tokens on plumbing.
+    worktree_ref: str = "HEAD"
 
     @classmethod
     def from_path(cls, path: Path) -> "Manifest":
@@ -1734,15 +1742,7 @@ class Manifest:
         if not isinstance(data, dict):
             raise ValueError("manifest root must be a JSON object")
         manifest = cls.from_obj(data)
-        return cls(
-            run_name=manifest.run_name,
-            workdir=manifest.workdir,
-            max_parallel=manifest.max_parallel,
-            worktrees=manifest.worktrees,
-            repo=manifest.repo,
-            tasks=manifest.tasks,
-            source_path=path,
-        )
+        return dataclass_replace(manifest, source_path=path)
 
     @classmethod
     def from_obj(cls, obj: dict[str, Any]) -> "Manifest":
@@ -1769,6 +1769,15 @@ class Manifest:
         if duplicates:
             raise ValueError(f"duplicate task keys: {', '.join(duplicates)}")
         worktrees = bool(obj.get("worktrees", False))
+        worktree_ref_raw = obj.get("worktree_ref")
+        if worktree_ref_raw is not None and not isinstance(worktree_ref_raw, str):
+            raise ValueError("worktree_ref must be a string")
+        worktree_ref = (worktree_ref_raw or "HEAD").strip() or "HEAD"
+        if worktree_ref != "HEAD" and not worktrees:
+            raise ValueError(
+                "worktree_ref is set but worktrees is false — the ref only pins "
+                "where task worktrees are created, so enable worktrees or drop it"
+            )
         if worktrees:
             reserved_logs_dir = (workdir / "logs").resolve()
             collisions = []
@@ -1788,6 +1797,7 @@ class Manifest:
             worktrees=worktrees,
             repo=repo,
             tasks=tasks,
+            worktree_ref=worktree_ref,
         )
 
     def with_max_parallel(self, value: int | None) -> "Manifest":
@@ -1795,15 +1805,7 @@ class Manifest:
             return self
         if value <= 0:
             raise ValueError("--max-parallel must be positive")
-        return Manifest(
-            run_name=self.run_name,
-            workdir=self.workdir,
-            max_parallel=value,
-            worktrees=self.worktrees,
-            repo=self.repo,
-            tasks=self.tasks,
-            source_path=self.source_path,
-        )
+        return dataclass_replace(self, max_parallel=value)
 
 
 FILE_TEST_OPS = {"-e", "-f", "-s", "-d", "-r", "-w", "-x", "-L"}
@@ -9432,8 +9434,11 @@ class RingerRunner:
                 str(self.manifest.repo),
                 "worktree",
                 "add",
+                # --detach so a branch-name ref cannot fail on "already
+                # checked out" — every taskdir gets a detached copy either way.
+                "--detach",
                 str(taskdir),
-                "HEAD",
+                self.manifest.worktree_ref,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
@@ -10456,7 +10461,7 @@ async def run_baseline(manifest: Manifest, *, config: AppConfig) -> int:
                     "add",
                     "--detach",
                     str(taskdir),
-                    "HEAD",
+                    manifest.worktree_ref,
                     stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
@@ -11123,7 +11128,20 @@ async def run_manifest(
         shutdown_started = True
         task.cancel()
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
+    # SIGHUP is in the set because a run's parent is often an interactive
+    # agent session: when that session dies (network drop, app crash, closed
+    # terminal), the shell HUPs the group. Unhandled, the orchestrator died
+    # mid-flush and left a ghost — state live/unfinished forever, workers
+    # killed with no ERROR verdicts recorded (observed 2026-07-31, when a
+    # network interruption took down the session driving a 3-lane review).
+    # An INHERITED ignore is respected: `nohup ./ringer.py run` means
+    # "survive hangups", and installing a handler over SIG_IGN would turn
+    # nohup into a graceful shutdown — the opposite of what it promises.
+    shutdown_signals = [signal.SIGINT, signal.SIGTERM]
+    hup = getattr(signal, "SIGHUP", None)  # absent on Windows
+    if hup is not None and signal.getsignal(hup) is not signal.SIG_IGN:
+        shutdown_signals.append(hup)
+    for sig in shutdown_signals:
         with contextlib.suppress(NotImplementedError, RuntimeError):
             loop.add_signal_handler(sig, request_shutdown)
             registered_signals.append(sig)

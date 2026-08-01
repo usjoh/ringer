@@ -366,6 +366,142 @@ class RingerCliTests(unittest.TestCase):
         self.assertEqual(state["state"], "finished")
         self.assertEqual(state["tasks"][0]["status"], "fail")
 
+    def spawn_sleeping_run(
+        self, name: str, *, preexec_fn=None
+    ) -> tuple[subprocess.Popen[str], int]:
+        """Start a run whose worker sleeps, and wait for the worker pid."""
+        manifest = self.write_manifest(
+            name,
+            self.manifest(
+                name,
+                {
+                    "key": "term",
+                    "engine": "sleep_then_write",
+                    "spec": "Sleep until signalled.",
+                    "expect_files": ["out.txt"],
+                    "timeout_s": 30,
+                    "check": 'test "$(cat out.txt 2>/dev/null)" = done',
+                },
+            ),
+        )
+        cmd = [
+            sys.executable,
+            "-B",
+            str(RINGER_PATH),
+            "--config",
+            str(self.config_path),
+            "run",
+            str(manifest),
+            "--no-dashboard",
+            "--identity",
+            "test-runner",
+        ]
+        env = os.environ.copy()
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env["RINGER_NO_SELF_UPDATE"] = "1"
+        proc = subprocess.Popen(
+            cmd,
+            cwd=ROOT,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            preexec_fn=preexec_fn,
+        )
+        worker_pid_path = self.root / f"work-{name}" / "term" / "worker.pid"
+        deadline = time.time() + 10
+        while time.time() < deadline and not worker_pid_path.exists():
+            time.sleep(0.05)
+        self.assertTrue(worker_pid_path.exists())
+        return proc, int(worker_pid_path.read_text(encoding="utf-8").strip())
+
+    @unittest.skipUnless(hasattr(signal, "SIGHUP"), "SIGHUP is a unix signal")
+    def test_sighup_cleans_up_like_sigterm(self) -> None:
+        # The signature this prevents: a run's parent agent session dies
+        # (network drop, closed terminal), the shell HUPs the group, and an
+        # unhandled orchestrator leaves state live/unfinished forever — a
+        # ghost run with no ERROR verdicts (observed 2026-07-31).
+        proc, worker_pid = self.spawn_sleeping_run("sighup")
+        try:
+            proc.send_signal(signal.SIGHUP)
+            stdout, _ = proc.communicate(timeout=10)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                stdout, _ = proc.communicate(timeout=10)
+
+        self.assertEqual(proc.returncode, 130, stdout)
+        self.assertFalse(self.pid_is_alive(worker_pid), stdout)
+        state = self.read_final_state()
+        self.assertTrue(state["finished"])
+        self.assertEqual(state["state"], "finished")
+
+    @unittest.skipUnless(hasattr(signal, "SIGHUP"), "SIGHUP is a unix signal")
+    def test_inherited_sighup_ignore_is_respected(self) -> None:
+        # `nohup ./ringer.py run` promises hangup survival by setting SIG_IGN;
+        # installing our handler over that would turn nohup into a graceful
+        # shutdown. An inherited ignore must stay ignored.
+        proc, worker_pid = self.spawn_sleeping_run(
+            "nohup", preexec_fn=lambda: signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        )
+        try:
+            proc.send_signal(signal.SIGHUP)
+            time.sleep(1.0)
+            self.assertIsNone(proc.poll(), "run must survive SIGHUP under nohup semantics")
+            self.assertTrue(self.pid_is_alive(worker_pid))
+            proc.send_signal(signal.SIGTERM)
+            stdout, _ = proc.communicate(timeout=10)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                stdout, _ = proc.communicate(timeout=10)
+
+        self.assertEqual(proc.returncode, 130, stdout)
+        state = self.read_final_state()
+        self.assertTrue(state["finished"])
+
+    def test_worktree_ref_pins_task_worktrees_to_the_named_commit(self) -> None:
+        # Two commits; the manifest pins the FIRST. Without the field, task
+        # worktrees spawn at HEAD and a baseline-anchored candidate forces
+        # sandboxed workers into checkout gymnastics they cannot perform
+        # (shared .git/worktrees metadata is outside their writable roots).
+        repo = self.root / "repo"
+        git = ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t"]
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / "a.txt").write_text("one", encoding="utf-8")
+        subprocess.run(git + ["add", "a.txt"], check=True)
+        subprocess.run(git + ["commit", "-q", "-m", "c1"], check=True)
+        sha1 = subprocess.run(
+            git + ["rev-parse", "HEAD"], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        (repo / "a.txt").write_text("two", encoding="utf-8")
+        subprocess.run(git + ["commit", "-q", "-am", "c2"], check=True)
+
+        manifest = self.write_manifest(
+            "pinned-ref",
+            self.manifest(
+                "pinned-ref",
+                {
+                    "key": "probe",
+                    "engine": "spec_shell",
+                    "spec": "git rev-parse HEAD > out.txt && cat a.txt >> out.txt",
+                    "expect_files": ["out.txt"],
+                    "check": f'test "$(head -1 out.txt)" = {sha1} && test "$(tail -1 out.txt)" = one',
+                },
+                worktrees=True,
+                repo=str(repo),
+            ),
+        )
+        # Inject the ref via the manifest file (the from_obj path a real run takes).
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data["worktree_ref"] = sha1
+        manifest.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+        result = self.run_ringer(manifest)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        rows = self.read_rows()
+        self.assertEqual(["PASS"], [row["verdict"] for row in rows], result.stdout)
+
     def test_custom_shell_engine_substitutes_spec_placeholder(self) -> None:
         manifest = self.write_manifest(
             "custom-shell",

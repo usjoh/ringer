@@ -240,6 +240,62 @@ class BaselineContainmentTests(unittest.TestCase):
             self.assertIn("task key escapes the baseline scratch root", output)
             self.assertIn("0 pass, 0 fail, 1 error of 1 check(s)", output)
 
+    def test_baseline_worktrees_honor_the_pinned_worktree_ref(self) -> None:
+        # Baseline checks must run against the SAME tree the workers will get:
+        # a manifest pinned to an older commit whose baseline ran at HEAD
+        # would judge check-craft against the wrong sources.
+        import asyncio
+        import contextlib
+        import importlib.util
+        import io
+
+        spec = importlib.util.spec_from_file_location("ringer_baseline_ref_test", ROOT / "ringer.py")
+        assert spec is not None and spec.loader is not None
+        ringer = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = ringer
+        spec.loader.exec_module(ringer)
+
+        with tempfile.TemporaryDirectory() as temp_root:
+            root = Path(temp_root)
+            repo = root / "repo"
+            init_git_repo(repo)
+            env = os.environ.copy()
+            env.update({"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+            sha1 = subprocess.run(
+                ["git", "-C", str(repo), "rev-parse", "HEAD"],
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            (repo / "README.md").write_text("changed at head\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "-C", str(repo), "commit", "--quiet", "-am", "second"],
+                check=True, env=env, capture_output=True,
+            )
+
+            manifest = ringer.Manifest.from_obj(
+                {
+                    "run_name": "baseline-pinned-ref",
+                    "workdir": str(root / "work"),
+                    "repo": str(repo),
+                    "worktrees": True,
+                    "worktree_ref": sha1,
+                    "tasks": [
+                        {
+                            "key": "pinned",
+                            "spec": "Placeholder; baseline spawns nothing.",
+                            # Passes ONLY in the first commit's tree.
+                            "check": "grep -q 'hello baseline' README.md",
+                        }
+                    ],
+                }
+            )
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                rc = asyncio.run(ringer.run_baseline(manifest, config=None))
+            output = buffer.getvalue()
+            self.assertEqual(0, rc, output)
+            self.assertIn("1 pass, 0 fail, 0 error of 1 check(s)", output)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

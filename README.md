@@ -108,6 +108,7 @@ Each task gets its own directory, its own worker, its own log, and its own verdi
 | `verified` | One plain-English sentence saying what the check proves — shown on the results page next to "finished & checked" |
 | `full_access` | Worker runs unsandboxed — required for workers that spawn their own sub-workers; must also be enabled in config |
 | `worktrees` (run-level) | Give each task an isolated git worktree of `repo` so parallel workers can't collide |
+| `worktree_ref` (run-level) | Commit the task worktrees are created at (default `HEAD`). Pin it when the work is anchored to an older immutable baseline — worktree creation runs orchestrator-side and unsandboxed, so this is free, whereas a sandboxed worker told to `git checkout` inside its worktree fails outright (the shared `.git/worktrees` metadata is outside its writable surface) |
 
 > **Worktree footgun:** on PASS the task's worktree is removed — including anything written inside it. In worktrees mode, worker logs live outside task worktrees in `workdir/logs/`; have workers write deliverables outside the worktree too, or have your `check` copy artifacts out before it exits 0.
 

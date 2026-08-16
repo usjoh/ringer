@@ -7591,7 +7591,7 @@ def db_attempt_rows(
         query = """
             SELECT run_id, task_key, logged_at, engine, model, reported_model, expected_model,
                    reasoning_effort, task_type, retry,
-                   verdict, duration_ms, worker_tokens, orchestrator
+                   verdict, duration_ms, worker_tokens, orchestrator, failure_class
             FROM attempts
         """
         params: list[Any] = []
@@ -7615,6 +7615,14 @@ def db_attempt_rows(
                 "duration_ms": row["duration_ms"],
                 "worker_tokens": row["worker_tokens"],
                 "orchestrator": row["orchestrator"],
+                # Load-bearing, and its absence was silent. DB rows carry no
+                # `notes`, so model_log_row_failure_class has no fallback to
+                # derive from: drop this column and EVERY failure arrives
+                # unclassified, which makes --attributable reject all of them
+                # instead of only the unattributable ones. Measured on a real
+                # log before the fix: 137 of 371 attempts dropped — exactly the
+                # non-PASS count — after which every model read 100% first-try.
+                "failure_class": row["failure_class"],
             }
             for row in conn.execute(query, params)
         ]

@@ -573,6 +573,19 @@ the fix and used the engine_args splice; later runs should use the `model` field
   opus-4.8 — the same set, not merely the same count. **No measurable separation
   from claude-opus-5 or claude-opus-4.8 on any corpus where they both ran.**
   Full method, scoring caveats and the two invalid key items are under "Process lessons (2026-08-02, kc-model-audition)".
+- 2026-08-16 (meridian `ms-20260815-1624`, ohalloran-demonstrator, `site-build`):
+  **the 0% first-try this model shows on site-build is NOT a model failure — do
+  not route away from it on this evidence.** Task `d-conversation`, 2 attempts,
+  both FAIL, 115.0k tok. The worker exited CLEANLY (`worker_returncode=0`) and
+  the check failed only on `missing_expect_files`: the manifest declared its
+  deliverable at an absolute path inside a Meridian session scratchpad
+  (`/private/tmp/claude-501/-Users-usjoh-Projects-meridian/<session>/scratchpad/…`),
+  which the opencode Seatbelt wrapper denies — it confines worker writes to the
+  task dir and the per-run scratch. The model did the work and physically could
+  not deliver it. Same run, same shape for opus-4.8; the two codex lanes
+  (`a-reveal`, `b-archive`) passed because they were not behind that profile.
+  This is the whole of this model's site-build record, so the scoreboard reads
+  0% from a manifest defect. Lint now warns on this shape (PR #36).
 
 ## claude-opus-5 via opencode (`openrouter/anthropic/claude-opus-5`)
 
@@ -583,9 +596,14 @@ the fix and used the engine_args splice; later runs should use the `model` field
   ~6s, error "Unexpected server error" + 501/529/5xx — OpenRouter-side
   unavailability, NOT a model result (it passed corpus 1 fine). Not retried a
   third time. ⚠️ Those two failures land as 4 FAIL rows and drag the default
-  scoreboard to 33%; `./ringer.py models --attributable` excludes them and shows
-  100% over the 1 task it actually completed. Read the attributable view before
-  routing away from this model. Full method, scoring caveats and the two invalid key items are under "Process lessons (2026-08-02, kc-model-audition)".
+  scoreboard to 33%, which understates a model that completed every task it was
+  actually served. ⚠️ **CORRECTION 2026-08-16:** this note first said
+  `models --attributable` "excludes them and shows 100%". It does show 100% —
+  but not because it identified the outage. On the DB read path the flag drops
+  EVERY failure (see "Process lessons (2026-08-16, --attributable is not
+  filtering what it says)"), so 100% there is not evidence of anything. Judge
+  this model from the corpus-1 result and the outage description above, not
+  from that flag. Full method, scoring caveats and the two invalid key items are under "Process lessons (2026-08-02, kc-model-audition)".
 
 ## claude-opus-4.8 via opencode (`openrouter/anthropic/claude-opus-4.8`)
 
@@ -596,6 +614,15 @@ the fix and used the engine_args splice; later runs should use the `model` field
   162s, missing the identical three items as sonnet-5. Zero measurable
   separation from sonnet-5 or opus-5 anywhere both ran, so on this workload it
   is the value pick of the Anthropic arms. Full method, scoring caveats and the two invalid key items are under "Process lessons (2026-08-02, kc-model-audition)".
+- 2026-08-16 (meridian `ms-20260815-1624`, ohalloran-demonstrator, `site-build`):
+  **the 0% first-try this model shows on site-build is NOT a model failure — do
+  not route away from it on this evidence.** Task `c-drawn`, 2 attempts, both
+  FAIL, 91.7k tok. Identical shape to sonnet-5's `d-conversation` in the same
+  run: clean worker exit (`worker_returncode=0`), failing only on
+  `missing_expect_files` for a deliverable declared inside a Meridian session
+  scratchpad the opencode Seatbelt wrapper denies writes to. The work was done
+  and could not be delivered. This is the whole of this model's site-build
+  record. Lint now warns on this shape (PR #36).
 
 ## nemotron-3-ultra-550b (via opencode, `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free`)
 
@@ -627,3 +654,49 @@ the fix and used the engine_args splice; later runs should use the `model` field
 - **The substring scorer was under-crediting everyone, and worst for the cheapest model.** corpus 2 sonnet/opus48 11/14 -> 12/13; nemotron 10/14 -> 12/13. nemotron's apparent one-item-per-corpus deficit was largely a scoring artifact — its ONLY genuine gap across both corpora is corpus 1's design-feedback capture. On corpus 2 the free 550B model tied both frontier arms exactly.
 - **The one shared corpus-2 miss is real, not a key defect.** All three arms missed `PO-20260509-4a91`, which the transcript names explicitly as a Sleep-audit forward-action ("r53 — professional subdomains/maam/** (~80 files) still undeclared; Operator-actionable"). A secondary item early in a 306KB read, dropped by every tier equally — genuine long-input recall loss, not model separation.
 - Method that worked and is worth reusing: re-judge EXISTING artifacts rather than re-running the arms (removes run-to-run variance from the comparison); blind the grader; use a different-lab grader; and require verbatim evidence spans checked programmatically so the grader itself is auditable.
+
+## Process lessons (2026-08-16, ohalloran-demonstrator — a manifest defect logged as two model failures)
+
+- 2026-08-16 (meridian `ms-20260815-1624`, ohalloran-demonstrator, `site-build`):
+  a four-lane site-build where the two opencode lanes are recorded FAIL and the
+  two codex lanes PASS — a shape that reads instantly as "the cheap lane cannot
+  cope" and is nothing of the kind. Both opencode workers exited CLEANLY
+  (`worker_returncode=0`); the checks failed only on `missing_expect_files`.
+  The manifest declared each deliverable at an absolute path inside the calling
+  Meridian session's scratchpad, which the opencode Seatbelt wrapper denies —
+  it confines writes to the task dir plus the per-run scratch. The codex lanes
+  passed because they were never behind that profile. **Diagnostic rule this
+  confirms for the third time in this file: read `worker_returncode` BEFORE
+  calling anything a model failure. A clean exit with absent deliverables is a
+  path contract defect, never a model result.**
+- The lint that exists to catch exactly this stayed silent for two reasons, both
+  fixed in PR #36. (1) `engine_confines_writes_to_taskdir` keyed only on codex's
+  `workspace-write` string and treated opencode's boundary as unknowable — it
+  never was, the Seatbelt profile ships in `engines/`. (2) The far more
+  important one: the check-exports exemption tested whether the check CONTAINED
+  the deliverable path, and this run's check was `python3 check-candidate.py
+  /abs/candidate.html` — a read-only verifier taking the path as an ARGUMENT.
+  **Naming a path is not writing it.** Fixing only (1) would have left this run
+  silent. Replaying the recorded check against the real config: 0 warnings
+  before, 1 after.
+- ⚠️ **`./ringer.py models --attributable` is not filtering what it says it is
+  (found 2026-08-16, unfixed at time of writing).** `db_attempt_rows` never
+  SELECTs the `failure_class` column, so on the DB read path — the default —
+  every row reaches the filter with no class, `model_log_row_failure_class`
+  returns None, and `model_log_row_is_model_attributable` rejects it. Measured
+  on this machine: the log holds 371 attempts of which 137 are non-PASS, and
+  the flag "dropped 137 row(s)" — i.e. EVERY failure, not the unattributable
+  ones. All 33 model rows then read 100% first-try. The column is populated
+  correctly in both `runs.jsonl` and `ringer.db`; only the reader drops it, so
+  no rebuild fixes it. **Until that is fixed, do not cite an --attributable
+  rate as evidence for anything** — including the opus-5 correction recorded
+  above, and including the 2026-07-28 attributable figures elsewhere in this
+  file, which were taken before the DB read path existed and should be
+  re-derived rather than trusted.
+- Standing conclusion: this file now carries three distinct false-model-failure
+  classes — check-strictness (GLM's wrapped bullets), path-contract
+  (lou-call-transcript, and this run), and infrastructure (opus-5's OpenRouter
+  outage). None of them are the model, all three land as FAIL, and the
+  scoreboard cannot separate them on its own. The eval row's
+  `worker_returncode`, `check_returncode` and `missing_expect_files` are what
+  separate them; read those three before routing.

@@ -504,3 +504,92 @@ class ModelDbTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class AttributableThroughReadModelTests(unittest.TestCase):
+    """The DB read path must classify failures exactly as the JSONL path does.
+
+    `db_attempt_rows` once omitted the `failure_class` column. DB rows carry no
+    `notes`, so `model_log_row_failure_class` had nothing to fall back on and
+    returned None for every failure — and `--attributable`, which keeps a
+    failure only when it is classed `model`, therefore rejected ALL of them. On
+    a real 371-attempt log that dropped 137 rows, exactly the non-PASS count,
+    after which every model read 100% first-try. The flag silently reported the
+    opposite of the evidence.
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.log_path = self.root / "runs.jsonl"
+        self.db_path = self.root / "ringer.db"
+        # One of each disposition: a pass, a real model failure, and two
+        # failures no model caused.
+        rows = [
+            {**attempt(run_id="r1", task_key="ok", verdict="PASS"), "failure_class": None},
+            {
+                **attempt(run_id="r1", task_key="judged", verdict="FAIL"),
+                "failure_class": "model",
+            },
+            {
+                **attempt(run_id="r1", task_key="died", verdict="FAIL"),
+                "failure_class": "engine-error",
+            },
+            {
+                **attempt(run_id="r1", task_key="opaque", verdict="FAIL"),
+                "failure_class": "unknown",
+            },
+        ]
+        write_jsonl(self.log_path, rows)
+        rebuild_read_model_db(self.db_path, self.log_path)
+
+    def db_rows(self) -> list[dict[str, object]]:
+        rows, _ = ringer.db_attempt_rows(self.db_path)
+        return rows
+
+    def test_db_rows_carry_the_failure_class(self) -> None:
+        by_task = {row["task_key"]: row for row in self.db_rows()}
+        self.assertEqual("model", by_task["judged"]["failure_class"])
+        self.assertEqual("engine-error", by_task["died"]["failure_class"])
+        self.assertEqual("unknown", by_task["opaque"]["failure_class"])
+
+    def test_attributable_keeps_the_judged_failure_and_drops_the_others(self) -> None:
+        kept = [
+            row
+            for row in self.db_rows()
+            if ringer.model_log_row_is_model_attributable(row)
+        ]
+        self.assertEqual(
+            {"ok", "judged"},
+            {row["task_key"] for row in kept},
+            "a model failure must survive --attributable; engine/unknown must not",
+        )
+
+    def test_db_path_and_jsonl_path_agree(self) -> None:
+        # The regression that matters: the two read paths must not disagree
+        # about what counts as evidence, whichever one `models` happens to use.
+        jsonl_rows, _ = ringer.read_model_log_rows(self.log_path)
+        db_kept = {
+            row["task_key"]
+            for row in self.db_rows()
+            if ringer.model_log_row_is_model_attributable(row)
+        }
+        jsonl_kept = {
+            row["task_key"]
+            for row in jsonl_rows
+            if ringer.model_log_row_is_model_attributable(row)
+        }
+        self.assertEqual(jsonl_kept, db_kept)
+
+    def test_reader_surfaces_every_attempts_column_the_classifier_reads(self) -> None:
+        # Guard against the next silent omission: any attempts column consumed
+        # by the classifier must actually reach the row dicts.
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(attempts)")}
+        surfaced = set(self.db_rows()[0])
+        required = {"verdict", "failure_class"} & columns
+        self.assertTrue(
+            required <= surfaced,
+            f"classifier inputs missing from db_attempt_rows: {required - surfaced}",
+        )

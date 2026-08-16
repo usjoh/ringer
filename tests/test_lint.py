@@ -11,6 +11,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from dataclasses import replace as dataclass_replace  # noqa: E402
+
 from ringer import (  # noqa: E402
     AppConfig,
     ArtifactConfig,
@@ -729,13 +731,19 @@ class LintManifestTests(unittest.TestCase):
         self.assertEqual([], findings)
 
     def test_w12_unconfined_engine_is_quiet(self) -> None:
-        # opencode's confinement lives in its wrapper script, invisible from
-        # config. Warning on a guess trains authors to ignore the warning.
+        # REVERSED 2026-08-16. This asserted that opencode must stay silent
+        # because its confinement was "invisible from config" — but the
+        # Seatbelt profile ships in engines/, so the boundary was always
+        # knowable, and the silence cost two lanes on the ohalloran-demonstrator
+        # run. The surviving principle is narrower and still holds: never warn
+        # for an engine whose boundary is genuinely unknown (see
+        # test_an_unknown_engine_bin_stays_silent). The shipped wrapper now
+        # warns, as it should have all along.
         findings = self.w12_findings(
             {"engine": "opencode", "check": "bash /work/check.sh"},
             ["/exports/cttc/review-r1.md"],
         )
-        self.assertEqual([], findings)
+        self.assertEqual(1, len(findings), findings)
 
     def test_w12_no_config_is_silent(self) -> None:
         # Plain `ringer.py lint` may run with no loadable config; the rule
@@ -866,6 +874,109 @@ class LintManifestTests(unittest.TestCase):
         # `run` blocks only on ERROR:-prefixed findings. The run is legitimate;
         # only its provenance is lost, so it must still be allowed to proceed.
         findings = self.w13_findings({"engine": "codex"})
+        self.assertFalse(findings[0].startswith("ERROR:"), findings[0])
+
+    # --- sandbox-unreachable deliverables -----------------------------------
+
+    DELIVERABLE = "/tmp/elsewhere/candidate.html"
+
+    def unreachable_findings(
+        self,
+        *,
+        check: str,
+        engine: str = "opencode",
+        full_access: bool = False,
+    ) -> list[str]:
+        extra: dict[str, object] = {"engine": engine, "check": check}
+        if full_access:
+            extra["full_access"] = True
+        return self.w12_findings(extra, [self.DELIVERABLE])
+
+    def test_opencode_wrapper_sandbox_is_visible_to_the_lint(self) -> None:
+        # Regression for the 2026-08-16 ohalloran-demonstrator run: deliverables
+        # declared in a session scratchpad the Seatbelt profile denies. Both
+        # opencode lanes did the work, could not deliver it, and were logged
+        # failure_class=model. The lint stayed silent because opencode's
+        # boundary was treated as unknowable.
+        findings = self.unreachable_findings(
+            check="python3 '/tmp/assets/check-candidate.py' '/tmp/elsewhere/candidate.html'"
+        )
+        self.assertEqual(1, len(findings), findings)
+        self.assertIn("candidate.html", findings[0])
+
+    def test_a_check_that_only_names_the_path_still_warns(self) -> None:
+        # The half that actually let the run through. A bare script call
+        # carrying the deliverable as an ARGUMENT reads it; it does not create
+        # it. The old substring test read that as the check-exports design.
+        findings = self.unreachable_findings(
+            check="verify.sh /tmp/elsewhere/candidate.html || exit 1"
+        )
+        self.assertEqual(1, len(findings), findings)
+
+    def test_a_check_that_exports_the_deliverable_stays_quiet(self) -> None:
+        # Checks run unsandboxed, so a deliverable outside the taskdir is
+        # legitimate exactly when the check puts it there.
+        for check in (
+            "cat out.html > /tmp/elsewhere/candidate.html",
+            "cp out.html /tmp/elsewhere/candidate.html",
+            "tee /tmp/elsewhere/candidate.html < out.html",
+        ):
+            with self.subTest(check=check):
+                self.assertEqual([], self.unreachable_findings(check=check))
+
+    def test_a_copy_elsewhere_does_not_vouch_for_a_later_path(self) -> None:
+        # Segment-bounded: an unrelated cp earlier in the check must not
+        # exempt a deliverable named later by a read-only verifier.
+        findings = self.unreachable_findings(
+            check="cp a.txt b.txt; verify.sh /tmp/elsewhere/candidate.html"
+        )
+        self.assertEqual(1, len(findings), findings)
+
+    def findings_with_engine(self, **engine_overrides: object) -> list[str]:
+        """Lint the same task against a variant of the opencode engine block."""
+        config = self.w12_config()
+        engine = dataclass_replace(config.engines["opencode"], **engine_overrides)
+        config = dataclass_replace(
+            config, engines={**config.engines, "opencode": engine}
+        )
+        task = self.task(check="verify.sh x", expect_files=[self.DELIVERABLE])
+        task["engine"] = "opencode"
+        return [
+            item
+            for item in lint_manifest(self.manifest([task]), config=config)
+            if "sandbox confines worker writes" in item
+        ]
+
+    def test_engine_may_declare_its_own_boundary(self) -> None:
+        # A wrapper ringer cannot read declares it outright...
+        self.assertEqual(
+            1,
+            len(
+                self.findings_with_engine(
+                    bin="/opt/my-wrapper.sh", confines_writes_to_taskdir=True
+                )
+            ),
+        )
+        # ...and an explicit false wins over the shipped-wrapper name.
+        self.assertEqual([], self.findings_with_engine(confines_writes_to_taskdir=False))
+
+    def test_an_unknown_engine_bin_stays_silent(self) -> None:
+        # The original principle holds: never warn from a guess.
+        self.assertEqual([], self.findings_with_engine(bin="/usr/local/bin/some-cli"))
+
+    def test_full_access_tasks_are_exempt(self) -> None:
+        # --no-sandbox is wired as full_access_args, so there is no boundary.
+        self.assertEqual(
+            [],
+            self.unreachable_findings(
+                check="verify.sh /tmp/elsewhere/candidate.html", full_access=True
+            ),
+        )
+
+    def test_sandbox_unreachable_is_a_warning_not_a_blocking_error(self) -> None:
+        findings = self.unreachable_findings(
+            check="verify.sh /tmp/elsewhere/candidate.html"
+        )
         self.assertFalse(findings[0].startswith("ERROR:"), findings[0])
 
     def test_templates_are_clean(self) -> None:

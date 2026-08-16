@@ -148,6 +148,17 @@ model_report_regex = "(?m)^model:[ \\t]*([^ \\t\\r\\n]+)[ \\t]*\\r?$"
 # ~/.local/share/opencode/auth.json ({"openrouter": {"type": "api", "key": "..."}});
 # confirm the path with your installed CLI.
 # Per-task engine_args can set reasoning effort ("--variant", "low|high|max").
+#
+# Because that wrapper confines writes, the lint warns when a task declares a
+# deliverable OUTSIDE its task dir and the check does not export it there —
+# otherwise the worker does the work and physically cannot deliver it, and the
+# eval row blames the model. Ringer recognises the wrappers it ships by name.
+# For a sandbox wrapper of your own, say so outright:
+#   confines_writes_to_taskdir = true    # or false to silence the rule
+# Omit it and ringer infers: codex's "workspace-write" sandbox_args, or one of
+# this repo's own wrappers. An engine it cannot read stays silent rather than
+# warning from a guess.
+#
 # Uncomment and set an absolute path for `bin` to enable.
 # [engines.opencode]
 # bin = "/absolute/path/to/ringer/engines/opencode-sandboxed.sh"

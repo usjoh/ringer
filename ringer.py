@@ -759,6 +759,10 @@ class EngineConfig:
     # its own "model" — this is what makes a harness engine (OpenCode) model
     # agnostic instead of hard-coding one model into the command line.
     model_default: str = ""
+    # Whether this engine's sandbox confines worker writes to the task dir.
+    # None means "work it out" (see engine_confines_writes_to_taskdir); set it
+    # explicitly for a wrapper whose boundary ringer cannot read from here.
+    confines_writes_to_taskdir: bool | None = None
 
     @property
     def process_name(self) -> str:
@@ -1620,6 +1624,17 @@ def load_engines(raw: Any) -> dict[str, EngineConfig]:
         model_default = str(
             section.get("model_default", base.model_default if base else "")
         ).strip()
+        raw_confines = section.get("confines_writes_to_taskdir")
+        if raw_confines is None:
+            confines_writes_to_taskdir = (
+                base.confines_writes_to_taskdir if base is not None else None
+            )
+        elif isinstance(raw_confines, bool):
+            confines_writes_to_taskdir = raw_confines
+        else:
+            raise ValueError(
+                f"engines.{clean_name}.confines_writes_to_taskdir must be true or false"
+            )
         engines[clean_name] = EngineConfig(
             name=clean_name,
             bin=bin_path,
@@ -1629,6 +1644,7 @@ def load_engines(raw: Any) -> dict[str, EngineConfig]:
             token_regex=token_regex,
             model_report_regex=model_report_regex,
             model_default=model_default,
+            confines_writes_to_taskdir=confines_writes_to_taskdir,
         )
     return engines
 
@@ -2184,15 +2200,72 @@ def unreachable_deliverable_findings(manifest: Manifest) -> list[str]:
     return findings
 
 
+# Wrappers THIS repo ships whose sandbox confines worker writes to the task
+# directory. Recognising them by name is not the guess the old docstring
+# warned against: the Seatbelt profile lives in engines/ a few lines from
+# here, and its writable surface is exactly TASKDIR + the per-run scratch.
+SANDBOXING_ENGINE_BINS = frozenset(
+    {"opencode-sandboxed.sh", "opencode-sandboxed-linux.sh"}
+)
+
+
 def engine_confines_writes_to_taskdir(engine: "EngineConfig") -> bool:
     """True when the engine's sandbox limits worker writes to the task dir.
 
-    Keyed on the codex CLI's "workspace-write" vocabulary because that is the
-    only sandbox whose write boundary is legible from config alone. opencode's
-    confinement lives inside its wrapper script, invisible from here — better
-    to stay silent than to warn from a guess.
+    Three sources, most explicit first:
+
+    1. The engine block says so outright (`confines_writes_to_taskdir`), which
+       is how a wrapper ringer cannot read declares its own boundary.
+    2. The codex CLI's "workspace-write" vocabulary in sandbox_args.
+    3. One of the sandboxing wrappers this repo ships, by bin name.
+
+    (3) closes a real gap: opencode's confinement was called "invisible from
+    here" and the lint stayed silent, so on 2026-08-16 a site-build run
+    declared its deliverables inside a session scratchpad the Seatbelt profile
+    denies, and two lanes did the work, could not deliver it, and were logged
+    as model failures. The boundary was never invisible — it ships in this
+    repo.
     """
-    return any("workspace-write" in arg for arg in engine.sandbox_args)
+    if engine.confines_writes_to_taskdir is not None:
+        return engine.confines_writes_to_taskdir
+    if any("workspace-write" in arg for arg in engine.sandbox_args):
+        return True
+    return Path(engine.bin).name in SANDBOXING_ENGINE_BINS
+
+
+# Commands that put a file where they are pointed. A redirect is handled
+# separately; these are the copy-shaped verbs a check uses to export.
+CHECK_WRITE_VERBS = ("cp", "mv", "install", "tee", "rsync", "ln")
+
+
+def check_appears_to_write(check: str, forms: Iterable[str]) -> bool:
+    """True when the check plausibly CREATES the path, not merely names it.
+
+    Naming is not writing. `python3 verify.py /abs/out.html` passes the path as
+    an ARGUMENT — it reads the file the worker was supposed to produce, which
+    is precisely the failure this lint exists to catch. A substring test cannot
+    tell the two apart, and treating any mention as the check-exports design is
+    what let the 2026-08-16 site-build run through: its check was a bare script
+    call carrying the deliverable path, exactly the "opaque check" the lint's
+    own docstring said should still warn.
+
+    Evidence of writing is a redirect onto the path, or a copy-shaped verb
+    somewhere in the same command segment. Anything else warns and asks the
+    author to confirm.
+    """
+    for form in forms:
+        if not form:
+            continue
+        quoted = re.escape(form)
+        # `> path`, `>> path`, with or without quoting.
+        if re.search(rf">>?\s*['\"]?{quoted}", check):
+            return True
+        # `cp ... path`, `tee path`, ... bounded to one command segment so a
+        # copy earlier in the check cannot vouch for an unrelated later path.
+        verbs = "|".join(CHECK_WRITE_VERBS)
+        if re.search(rf"\b(?:{verbs})\b[^;&|\n]*{quoted}", check):
+            return True
+    return False
 
 
 def sandbox_unreachable_deliverable_findings(
@@ -2233,15 +2306,17 @@ def sandbox_unreachable_deliverable_findings(
             resolved = resolve_for_compare(written)
             if resolved == taskdir or taskdir in resolved.parents:
                 continue
-            # The check names the path — the check-exports pattern.
-            if any(form in task.check for form in (rel, str(written), str(resolved))):
+            # The check WRITES the path — the check-exports pattern. Merely
+            # naming it is not enough; see check_appears_to_write.
+            if check_appears_to_write(task.check, (rel, str(written), str(resolved))):
                 continue
             findings.append(
                 f"{task.key}: deliverable {rel} is outside the task directory, and "
                 f"{task.engine}'s sandbox confines worker writes to the task directory — "
                 "the worker cannot create it there. Have the CHECK export it (checks run "
                 "unsandboxed), or the task fails with the work complete and the retry "
-                "fails identically."
+                "fails identically. If your check already creates this file by some means "
+                "this lint cannot see, that is what this warning is asking you to confirm."
             )
     return findings
 

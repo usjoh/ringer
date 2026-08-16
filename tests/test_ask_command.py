@@ -391,6 +391,32 @@ class AskCommandTests(unittest.TestCase):
             self.assertEqual(1, proc.returncode, proc.stdout + proc.stderr)
             self.assertEqual("1", counter.read_text())
 
+    def test_spec_asks_for_every_deliverable_the_check_verifies(self) -> None:
+        # The check demands answer.md, but the context packet only ever said
+        # "answer in plain English" — nothing told the worker where to put it.
+        # `ask` runs max_attempts=1 by design, so there was no retry to rescue
+        # the mismatch and every real-engine run failed on a file the worker
+        # was never asked to write.
+        packet = ringer.build_context_packet("What does this repository do?")
+        manifest = ringer.one_request_manifest(
+            packet=packet,
+            workdir=Path("request"),
+            engine="answer-mock",
+            timeout_s=60,
+            reasoning_effort="low",
+            model=None,
+            redact=False,
+        )
+        task = manifest.tasks[0]
+
+        self.assertEqual((ringer.ANSWER_FILE_NAME,), task.expect_files)
+        for rel in task.expect_files:
+            self.assertIn(rel, task.check, "check must verify the deliverable")
+            self.assertIn(rel, task.spec, "spec must ask for the deliverable")
+        # The instruction is additive: the request itself must survive intact.
+        self.assertIn("What does this repository do?", task.spec)
+        self.assertEqual(1, task.max_attempts)
+
     def test_max_attempts_parses_defaults_and_validates_positive(self) -> None:
         base = {
             "key": "one",

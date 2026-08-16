@@ -727,6 +727,56 @@ class RingerCliTests(unittest.TestCase):
         self.assertNotEqual(returncode, 0)
         self.assertIn("[ringer.py] check timed out after 1s", output)
 
+    def test_check_timeout_s_parses_defaults_and_validates_positive(self) -> None:
+        base = {"key": "one", "spec": "Do the work.", "check": "true"}
+        self.assertEqual(
+            ringer.CHECK_TIMEOUT_S,
+            ringer.TaskSpec.from_obj(base).check_timeout_s,
+        )
+        self.assertEqual(
+            900,
+            ringer.TaskSpec.from_obj({**base, "check_timeout_s": 900}).check_timeout_s,
+        )
+        with self.assertRaisesRegex(ValueError, "check_timeout_s must be positive"):
+            ringer.TaskSpec.from_obj({**base, "check_timeout_s": 0})
+
+    def test_per_task_check_timeout_can_raise_the_global_limit(self) -> None:
+        # The bug: the check kill timer was hard-coded, so a gate that builds
+        # or runs a real test suite was killed at the default and reported as
+        # TIMEOUT — indistinguishable from a model failure, with no knob to
+        # raise. A task that declares a longer check_timeout_s must survive.
+        original_timeout = ringer.CHECK_TIMEOUT_S
+        ringer.CHECK_TIMEOUT_S = 1
+        task = ringer.TaskSpec(
+            key="slow-gate",
+            spec="a self-contained spec long enough to pass validation " * 2,
+            check="sleep 3",
+            check_timeout_s=30,
+        )
+        try:
+            with tempfile.TemporaryDirectory(prefix="ringer-check-timeout-task-") as tmp:
+                result = asyncio.run(ringer.Verifier().verify(task, Path(tmp)))
+        finally:
+            ringer.CHECK_TIMEOUT_S = original_timeout
+
+        self.assertFalse(result.check_timed_out)
+        self.assertEqual(0, result.check_returncode)
+        self.assertTrue(result.ok)
+
+    def test_per_task_check_timeout_still_kills_a_runaway_check(self) -> None:
+        task = ringer.TaskSpec(
+            key="runaway-gate",
+            spec="a self-contained spec long enough to pass validation " * 2,
+            check="sleep 30",
+            check_timeout_s=1,
+        )
+        with tempfile.TemporaryDirectory(prefix="ringer-check-runaway-") as tmp:
+            result = asyncio.run(ringer.Verifier().verify(task, Path(tmp)))
+
+        self.assertTrue(result.check_timed_out)
+        self.assertFalse(result.ok)
+        self.assertIn("check timed out after 1s", result.raw_output_excerpt)
+
     def test_token_count_parser_accepts_colon_and_newline_formats(self) -> None:
         self.assertEqual(ringer.parse_token_count("tokens used: 1,234", r"tokens\s+used\s*:?\s*([0-9][0-9,]*)"), 1234)
         self.assertEqual(ringer.parse_token_count("tokens used\n5,678", r"tokens\s+used\s*:?\s*([0-9][0-9,]*)"), 5678)

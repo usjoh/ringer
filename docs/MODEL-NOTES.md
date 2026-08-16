@@ -411,6 +411,7 @@ checks and raw logs support — no vibes, no worker self-reports.
 - 2026-07-15 ringer-self-update run (3 serial tasks, direct-repo-edit mode): code-fix baseline-test repair 1/1 first-try (61k tokens, 1.6m); code-feature self-update mechanism (git fetch/ff-pull/re-exec + HUD staleness restart + 20-test suite) 1/1 first-try at high effort (153k, 8.1m); code-feature signal-contract (all 3 scoreboard surfaces + canonical-route lint enforcement) passed on retry (358k, 13.7m) — attempt 1 died on stale old-column assertions in pre-existing tests it hadn't finished updating; the retry prompt's injected FAIL list was enough to close it out. Lesson: when a task rewrites a display contract, name every test file asserting the old contract in the spec's ownership list AND tell it to update them FIRST.
 - 2026-07-09 code-feature/code-fix (ringside-overhaul): 4/4 first-try — a ringer.py logging change with tests, a 265-line stdlib backfill CLI (atomic rewrite, dry-run, idempotence all check-verified), a ~1500-line single-file HTML redesign (running-now pills + worker-card grid + multi-expansion refactor, 30KB patch, node --check + contract greps + unittest), and a render-gating change where it correctly UPDATED tests asserting the old behavior instead of gaming the check. Medium/high reasoning, 65–120k tokens/task.
 - Same day, different session (bench-harness-patches, code-fix): 0.29 first-try over 7 tasks on a Next.js/Turbopack harness. Spec and check quality dominate model choice — see the scoreboard before generalizing either number.
+- 2026-08-02 (meridian, kc-model-audition pass 3, `bakeoff` judge lane): 7/7 judge tasks PASS first try, grading the 7 bakeoff artifacts BLIND (MODEL: line stripped, files renamed arm-01..07) and deliberately chosen as a DIFFERENT LAB from the 4 Anthropic / 1 NVIDIA arms it graded. Every verdict adjudicated each concept exactly once, and every HIT carried an evidence span verified VERBATIM against the graded summary. The anti-fabrication gate was self-tested 3 ways pre-run (real quote -> pass; fabricated quote -> all hits rejected; dropped concepts -> structural fail). Re-judging existing artifacts with a blinded, different-lab grader is the method worth reusing.
 
 ## GPT-5.5 (codex) — attribution caveat
 - Scoreboard rows dated before 2026-07-09 may actually be gpt-5.6: codex eval rows logged model="" until the write-time stamping fix (PR #18) and were credited to GPT-5.5 by the registry default at read time, while the machine's codex default had already moved to gpt-5.6-sol at an unknown earlier date. `scripts/backfill_model_from_logs.py` re-stamps rows with surviving command-log evidence; anything it skips is a mixed-model aggregate. Trust post-2026-07-09 rows.
@@ -562,3 +563,67 @@ the fix and used the engine_args splice; later runs should use the `model` field
 - 11 dispatches over one artifact (impl medium; fix/fix2 high; fix3/fix4/fix5 medium; 4 verifies high): every worker round first-try PASS except fix5, whose 2-attempt FAIL was ORCHESTRATOR-CLASS — the spec mandated a comment containing 'getAs' while the check greped the function body for that same string (self-contradictory manifest). Second orchestrator-class defect same run: my local integration gate greped comments too (comment-vs-code false positive, twice in one day — gate scripts must strip comments; this codebase already learned that lesson at r181 and I re-learned it). Neither failure was the model's.
 - Verify lane at high earned its cost 4× over: caught the fix round's own lock-across-Drive regression (the exact class it was primed with), the platform-invalid normalization design was flagged by every verify round's blind-spot list as needing a live fixture — and the live probe confirmed it (Apps Script Blob.getAs cannot re-encode raster images; harness mocks structurally cannot see platform capability gaps).
 - Verify rounds ran 640-800s at high, 109-162k tokens; fix rounds converged faster when findings carried line-cited evidence.
+
+## claude-sonnet-5 via opencode (`openrouter/anthropic/claude-sonnet-5`)
+
+- 2026-08-02 (meridian, kc-model-audition, `bakeoff`): 2/2 PASS first try on dense-transcript knowledge extraction across two
+  corpora. Corpus 1 (67KB): 11/11 substring and 11/11 concept-level, 65.5k tok /
+  162s. Corpus 2 (306KB): 11/14 substring rising to 12/13 once re-scored at
+  concept level, 169.8k tok / 210s. Missed the IDENTICAL three corpus-2 items as
+  opus-4.8 — the same set, not merely the same count. **No measurable separation
+  from claude-opus-5 or claude-opus-4.8 on any corpus where they both ran.**
+  Full method, scoring caveats and the two invalid key items are under "Process lessons (2026-08-02, kc-model-audition)".
+
+## claude-opus-5 via opencode (`openrouter/anthropic/claude-opus-5`)
+
+- 2026-08-02 (meridian, kc-model-audition, `bakeoff`): corpus 1 PASS first try — 11/11 substring and 11/11 concept-level,
+  69.2k tok / 224s. **Verbosity bought nothing**: 5131 words against opus-4.8's
+  1660 for the identical 11/11 — 3x the length and ~2.4x the wall-clock for zero
+  recall gain. Corpus 2 never produced a result: FAILED TWICE with 0 tokens in
+  ~6s, error "Unexpected server error" + 501/529/5xx — OpenRouter-side
+  unavailability, NOT a model result (it passed corpus 1 fine). Not retried a
+  third time. ⚠️ Those two failures land as 4 FAIL rows and drag the default
+  scoreboard to 33%; `./ringer.py models --attributable` excludes them and shows
+  100% over the 1 task it actually completed. Read the attributable view before
+  routing away from this model. Full method, scoring caveats and the two invalid key items are under "Process lessons (2026-08-02, kc-model-audition)".
+
+## claude-opus-4.8 via opencode (`openrouter/anthropic/claude-opus-4.8`)
+
+- 2026-08-02 (meridian, kc-model-audition, `bakeoff`): 2/2 PASS first try. Corpus 1 (67KB): 11/11 substring and 11/11
+  concept-level in 57.2k tok / 92s — the fastest and cheapest of the three
+  Anthropic arms at identical recall, and in 1660 words against opus-5's 5131.
+  Corpus 2 (306KB): 11/14 substring rising to 12/13 concept-level, 162.4k tok /
+  162s, missing the identical three items as sonnet-5. Zero measurable
+  separation from sonnet-5 or opus-5 anywhere both ran, so on this workload it
+  is the value pick of the Anthropic arms. Full method, scoring caveats and the two invalid key items are under "Process lessons (2026-08-02, kc-model-audition)".
+
+## nemotron-3-ultra-550b (via opencode, `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free`)
+
+- 2026-08-02 (meridian, kc-model-audition, `bakeoff`): 2/2 PASS first try at $0. Corpus 1: 10/11 substring and 10/11
+  concept-level, 43.0k tok / 163s — the single genuine miss across BOTH corpora
+  is corpus 1's design-feedback capture (which occurs 3x in the input). Corpus 2:
+  10/14 substring rising to **12/13 concept-level, tying both frontier arms
+  exactly**, 128.2k tok / 153s. Its apparent one-item-per-corpus deficit was
+  largely a scoring artifact — the substring scorer under-credited everyone and
+  worst for the cheapest model. Frontier-adjacent recall on this workload for
+  free. Full method, scoring caveats and the two invalid key items are under "Process lessons (2026-08-02, kc-model-audition)".
+
+## Process lessons (2026-08-02, kc-model-audition — bakeoff scoring method)
+
+- 2026-08-02 (meridian, kc-model-audition, `bakeoff`): 4-arm bakeoff, `bakeoff` task_type, one dense 67KB session transcript
+  through each arm producing a KC Summary; scored by a pre-registered 13-item
+  ground-truth key derived from `git log` BEFORE any spec was written. All 4
+  arms PASS first try, zero retries. Round 2 re-ran corpus 2 (ms-20260529-1623,
+  306KB / 4.6x corpus 1, 14 pre-validated key items); pass 3 re-scored the SAME
+  7 artifacts at concept level with no re-extraction, so every pass-3 delta is
+  measurement, not run-to-run variance. Per-model results are filed under each
+  model's own heading above.
+- **Two of my 13 key items were invalid, and the arms' unanimity is what exposed them.** (1) `edit-freshness` — 0 occurrences in the transcript; it came from a commit whose message *names* the session but was authored 2 days later by `ms-20260711-0629` doing triage ABOUT that session. `git log --grep=<session-id>` catches later commits that merely reference the session; it is NOT a safe ground-truth derivation for "what was in this transcript". (2) `tool-entities` — also 0 occurrences, yet 3 of 4 arms independently wrote "entity-registered". The claim is TRUE per git but not derivable from their input: strong domain inference, not hallucination — and unscoreable by a recall-only check.
+- Lesson for future bakeoff keys: **validate every key item against the actual input corpus before running**, not just against the artifact trail. A key item absent from the input measures nothing and silently penalizes every arm equally. Unanimous misses are a key smell, not a model finding.
+- Lesson on pattern brittleness: matching `entity registration` failed against the arms' actual phrasing `entity-registered`. Substring patterns need morphological variants or the check punishes phrasing, not substance.
+- **The scorer systematically under-credits paraphrase, and it under-credits precisely on the discriminating items.** Post-hoc inspection of the three shared misses: (1) `disney-template` is an INVALID item — its single transcript occurrence is a NEGATION ("decision room, **not** itinerary or Disney dashboard"); all arms were correct to omit it. (2) `phase-labels` — every arm captured the concept as "phase taxonomy" / "'Phase 3' terminology retired"; the pattern only matched the literal "phase label". (3) `decks-clearing` — sonnet wrote "clear the decks", which matches none of `decks-clearing|decks clearing|clearing the decks|tranche`. So 3 of 14 corpus-2 items were mis-scored, ALL in the under-credit direction.
+- **Standing conclusion for bakeoff design: recall numbers from a substring scorer are FLOORS, not measurements, and inter-arm gaps smaller than ~2 items are inside the noise.** Two corpora now show no measurable separation between claude-sonnet-5 and claude-opus-4.8 on dense-transcript knowledge extraction. Free nemotron-550b trails by roughly one genuine item per corpus (missed the design-feedback capture on corpus 1; missed the Room<->Project data-ownership line and PO-20260509-4a91 on corpus 2) — creditable performance for $0.
+- Next time: score with an LLM judge over concept lists, or require arms to emit a structured id list, rather than substring-grepping prose. Do not report substring recall to 3 decimal places; it does not carry that precision.
+- **The substring scorer was under-crediting everyone, and worst for the cheapest model.** corpus 2 sonnet/opus48 11/14 -> 12/13; nemotron 10/14 -> 12/13. nemotron's apparent one-item-per-corpus deficit was largely a scoring artifact — its ONLY genuine gap across both corpora is corpus 1's design-feedback capture. On corpus 2 the free 550B model tied both frontier arms exactly.
+- **The one shared corpus-2 miss is real, not a key defect.** All three arms missed `PO-20260509-4a91`, which the transcript names explicitly as a Sleep-audit forward-action ("r53 — professional subdomains/maam/** (~80 files) still undeclared; Operator-actionable"). A secondary item early in a 306KB read, dropped by every tier equally — genuine long-input recall loss, not model separation.
+- Method that worked and is worth reusing: re-judge EXISTING artifacts rather than re-running the arms (removes run-to-run variance from the comparison); blind the grader; use a different-lab grader; and require verbatim evidence spans checked programmatically so the grader itself is auditable.

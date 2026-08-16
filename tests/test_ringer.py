@@ -731,6 +731,65 @@ class RingerCliTests(unittest.TestCase):
         self.assertEqual(ringer.parse_token_count("tokens used: 1,234", r"tokens\s+used\s*:?\s*([0-9][0-9,]*)"), 1234)
         self.assertEqual(ringer.parse_token_count("tokens used\n5,678", r"tokens\s+used\s*:?\s*([0-9][0-9,]*)"), 5678)
 
+    def test_token_count_survives_ansi_around_label_and_value(self) -> None:
+        token_regex = r"tokens\s+used\s*:?\s*([0-9][0-9,]*)"
+        # Escapes around the VALUE break \s* before the digits; escapes around
+        # the LABEL break the literal match. Both lose the count entirely.
+        self.assertEqual(
+            ringer.parse_token_count("tokens used: \x1b[1m1,234\x1b[0m", token_regex),
+            1234,
+        )
+        self.assertEqual(
+            ringer.parse_token_count("\x1b[2mtokens used:\x1b[0m 1,234", token_regex),
+            1234,
+        )
+        self.assertEqual(
+            ringer.parse_token_count("\x1b[2K\x1b[1Gtokens used: 42", token_regex),
+            42,
+        )
+
+    def test_reported_model_is_never_stamped_with_escape_codes(self) -> None:
+        regex = ringer.DEFAULT_CODEX_MODEL_REPORT_REGEX
+        # The dangerous case: a colorized VALUE still matches, so the escapes
+        # are captured INTO the model id and written to the eval row, where
+        # they can never match a known model. Silent corruption, not a miss.
+        self.assertEqual(
+            ringer.parse_reported_model("model: \x1b[36mgpt-5.6-sol\x1b[0m", regex),
+            "gpt-5.6-sol",
+        )
+        self.assertEqual(
+            ringer.parse_reported_model("\x1b[1mmodel:\x1b[0m gpt-5.6-sol", regex),
+            "gpt-5.6-sol",
+        )
+        # OSC (terminal-title) sequences are BEL-terminated, not CSI.
+        self.assertEqual(
+            ringer.parse_reported_model("\x1b]0;codex\x07model: glm-5.2", regex),
+            "glm-5.2",
+        )
+
+    def test_strip_ansi_leaves_ordinary_output_untouched(self) -> None:
+        for text in (
+            "model: gpt-5.6-sol",
+            "tokens used: 1,234",
+            "cost [1m] estimate 40% of 100%",
+            "",
+        ):
+            self.assertEqual(ringer.strip_ansi(text), text)
+
+    def test_codex_usage_skips_no_json_event_when_stream_is_colorized(self) -> None:
+        event = json.dumps(
+            {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}}
+        )
+        with tempfile.TemporaryDirectory(prefix="ringer-usage-ansi-") as tmp:
+            log = Path(tmp) / "worker.log"
+            log.write_text(f"\x1b[32m{event}\x1b[0m\n", encoding="utf-8")
+            usage = ringer.codex_usage_from_log(log)
+
+        self.assertIsNotNone(usage)
+        assert usage is not None
+        self.assertEqual(10, usage["input_tokens"])
+        self.assertEqual(5, usage["output_tokens"])
+
 
 if __name__ == "__main__":
     unittest.main()

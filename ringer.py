@@ -64,6 +64,17 @@ SELF_UPDATE_FETCH_TIMEOUT_S = 10
 SELF_UPDATE_STATE_FILE = "self-update.json"
 DEFAULT_TOKEN_REGEX = r"tokens\s+used\s*:?\s*([0-9][0-9,]*)"
 DEFAULT_CODEX_MODEL_REPORT_REGEX = r"(?m)^model:[ \t]*([^ \t\r\n]+)[ \t]*\r?$"
+# Workers are spawned on a pipe, but a harness that colorizes unconditionally
+# (or is told to by FORCE_COLOR/CLICOLOR_FORCE) writes SGR codes into the very
+# banners and summaries these regexes read. Two distinct failures, and the
+# second is the dangerous one: an escape around the LABEL breaks the match and
+# the fact is simply lost, while an escape around the VALUE still matches and
+# captures the escapes INTO the value — writing a model id to the eval row that
+# can never match a known model. Covers CSI (\x1b[...m), OSC (BEL- or
+# ST-terminated), and two-character escapes.
+ANSI_ESCAPE_RE = re.compile(
+    r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])"
+)
 # Harnesses announce their model in a banner at startup, but the capture buffer
 # the banner is scraped from keeps only the TAIL of a worker's output. A long
 # run therefore scrolls its own identity out of the buffer before anyone reads
@@ -9988,7 +9999,20 @@ def parse_env_file(path: Path) -> dict[str, str]:
     return values
 
 
+def strip_ansi(text: str) -> str:
+    """Drop terminal escape sequences before a machine fact is read out.
+
+    Stripping happens at PARSE time, never at capture time: `worker.log` is the
+    raw record of what the worker actually emitted and rewriting it would break
+    the invariant that captured worker output is never modified.
+    """
+    if "\x1b" not in text:
+        return text
+    return ANSI_ESCAPE_RE.sub("", text)
+
+
 def parse_token_count(text: str, token_regex: str | None = DEFAULT_TOKEN_REGEX) -> int | None:
+    text = strip_ansi(text)
     if token_regex:
         matches = list(re.finditer(token_regex, text, flags=re.IGNORECASE))
         for match in reversed(matches):
@@ -10013,7 +10037,7 @@ def parse_token_count(text: str, token_regex: str | None = DEFAULT_TOKEN_REGEX) 
 def parse_reported_model(text: str, model_report_regex: str | None) -> str | None:
     if not model_report_regex:
         return None
-    match = re.search(model_report_regex, text, flags=re.IGNORECASE)
+    match = re.search(model_report_regex, strip_ansi(text), flags=re.IGNORECASE)
     if match is None or match.lastindex is None:
         return None
     value = match.group(1).strip()
@@ -10819,6 +10843,10 @@ def codex_usage_from_log(path: Path) -> dict[str, int] | None:
     }
     found = False
     for line in lines:
+        # Same reason as parse_token_count: a colorized stream puts escapes
+        # ahead of the '{', so the JSON event is skipped and `ask` reports no
+        # model use at all.
+        line = strip_ansi(line)
         if not line.startswith("{"):
             continue
         try:

@@ -21,11 +21,12 @@ TASKDIR="${1:?usage: opencode-sandboxed.sh <taskdir> [--no-sandbox] <args...>}";
 SANDBOX=1
 if [ "${1:-}" = "--no-sandbox" ]; then SANDBOX=0; shift; fi
 
-# Stagger simultaneous spawns. All OpenCode instances share one SQLite state DB
-# (~/.local/share/opencode/opencode.db); when a swarm launches several workers
-# in the same instant, the startup write burst collides and the losers die with
-# "database is locked", silently burning their one retry. A uniform 0-4s random
-# jitter desynchronizes the stampede. (Observed on 2026-07-06 and 2026-07-08.)
+# Stagger simultaneous spawns. This was the ONLY defence against the shared
+# session DB (see XDG_DATA_HOME below) and never a cure — it only narrowed the
+# window in which two workers collide. Now that each sandboxed worker gets a
+# private store it is a secondary net, kept because it also spreads the startup
+# burst of network and provider calls. Safe to delete once a wide fan-out has
+# been observed clean. (Contention observed 2026-07-06 and 2026-07-08.)
 # The %02d pad keeps the fraction two digits so the delay is uniform across
 # [0.00, 3.99] — a bare $((RANDOM % 100)) yields "3.5" (=3.5s), not "3.05".
 sleep "$((RANDOM % 4)).$(printf '%02d' "$((RANDOM % 100))")"
@@ -37,6 +38,10 @@ if ! OPENCODE_BIN="$(command -v opencode)" || [ -z "$OPENCODE_BIN" ]; then
 fi
 
 if [ "$SANDBOX" = "0" ]; then
+  # Deliberately keeps the SHARED session DB. The private-store fix below hangs
+  # off the scratch dir and its EXIT trap, and this path `exec`s — the trap
+  # would never fire, so the scratch root would leak on every full-access run.
+  # Fine for a lone full-access task; do not fan this mode out wide.
   exec "$OPENCODE_BIN" "$@" < /dev/null
 fi
 
@@ -68,7 +73,8 @@ cat > "$PROFILE" <<'SBEOF'
   (subpath (param "SCRATCH"))
   (subpath (param "OC_SHARE"))
   (subpath (param "OC_STATE"))
-  (subpath (param "OC_CONFIG")))
+  (subpath (param "OC_CONFIG"))
+  (subpath (param "OC_BASE")))
 ; /dev is needed for /dev/null, /dev/urandom, etc.; writes there can't create
 ; persistent files without root, so a few literals are allowed rather than via param.
 (allow file-write-data
@@ -81,6 +87,37 @@ export TMPDIR="$SCRATCH"
 export XDG_CACHE_HOME="$SCRATCH/cache"
 mkdir -p "$XDG_CACHE_HOME"
 
+# Private session store per worker.
+#
+# OpenCode keeps its session state at $XDG_DATA_HOME/opencode/opencode.db —
+# ONE SQLite file, shared by every instance, opened for write and growing
+# without bound (145 MB on this machine as of 2026-08-16). Fan several workers
+# out at once and the losers of the lock race die before the model emits a
+# token:
+#
+#     Error: Unexpected error
+#     database is locked
+#
+# Ringer records that as an ordinary FAIL, so the scoreboard reads it as the
+# model failing when no model ever ran. Every non-Codex model routes through
+# this engine, so the damage lands hardest on exactly the cheap tier you fan
+# out widest, and worsens as parallelism rises — a surface misstating what
+# happened, which is the failure class this project treats as unforgivable.
+#
+# A private data root per worker removes the contention outright. It lives
+# under SCRATCH, so the existing EXIT trap tears it down with everything else,
+# and the Seatbelt profile already grants SCRATCH write access.
+export XDG_DATA_HOME="$SCRATCH/share"
+mkdir -p "$XDG_DATA_HOME/opencode"
+
+# Credentials live INSIDE the directory we just moved, so seed them or the
+# worker starts with no provider auth at all. COPY, never symlink: the profile
+# denies writes outside SCRATCH and a symlink would resolve straight back to
+# the shared file this exists to avoid. -p preserves the 0600 mode.
+if [ -f "$HOME/.local/share/opencode/auth.json" ]; then
+  cp -p "$HOME/.local/share/opencode/auth.json" "$XDG_DATA_HOME/opencode/auth.json"
+fi
+
 # Run as a child (not exec) so the EXIT trap fires and cleans up the profile +
 # scratch dir even on the success path; propagate the child's exit status.
 set +e
@@ -90,6 +127,7 @@ set +e
   -D "OC_SHARE=$HOME/.local/share/opencode" \
   -D "OC_STATE=$HOME/.local/state/opencode" \
   -D "OC_CONFIG=$HOME/.config/opencode" \
+  -D "OC_BASE=$HOME/.opencode" \
   -f "$PROFILE" "$OPENCODE_BIN" "$@" < /dev/null
 status=$?
 set -e

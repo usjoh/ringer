@@ -10730,6 +10730,20 @@ def one_request_workdir(config: AppConfig, supplied: Path | None) -> Path:
     return workdir
 
 
+ANSWER_FILE_NAME = "answer.md"
+
+# The packet tells the worker to answer in plain English; nothing in it says
+# WHERE. Without this line the spec and the check disagree — the check demands
+# answer.md, the worker prints to stdout, and `ask` fails on every real engine
+# with a deliverable it was never asked for (upstream issue #102). `ask` runs
+# max_attempts=1 by design, so there is no retry to rescue it.
+ANSWER_FILE_INSTRUCTION = (
+    f"Write the complete answer to a file named `{ANSWER_FILE_NAME}` in your "
+    "working directory. That file is the deliverable and the only thing "
+    "verified — an answer left in terminal output alone counts as no answer."
+)
+
+
 def one_request_manifest(
     *,
     packet: ContextPacket,
@@ -10754,21 +10768,21 @@ def one_request_manifest(
         tasks=(
             TaskSpec(
                 key="answer",
-                spec=packet.text,
+                spec=f"{packet.text}\n{ANSWER_FILE_INSTRUCTION}\n",
                 check=(
-                    "test -s answer.md || "
-                    "{ echo 'FAIL: answer.md was not created or is empty'; exit 1; }"
+                    f"test -s {ANSWER_FILE_NAME} || "
+                    f"{{ echo 'FAIL: {ANSWER_FILE_NAME} was not created or is empty'; exit 1; }}"
                 ),
                 engine=engine,
-                expect_files=("answer.md",),
+                expect_files=(ANSWER_FILE_NAME,),
                 timeout_s=timeout_s,
                 max_attempts=1,
                 redact_spec=redact,
                 engine_args=tuple(engine_args),
                 model=model or "",
                 verified=(
-                    "answer.md exists and is not empty; this does not prove "
-                    "that the answer is correct"
+                    f"{ANSWER_FILE_NAME} exists and is not empty; this does not "
+                    "prove that the answer is correct"
                 ),
                 task_type="one-request",
             ),
@@ -10892,7 +10906,7 @@ def run_one_request(config: AppConfig, args: argparse.Namespace) -> int:
             force_browser=False,
         )
     )
-    answer_path = workdir / "answer" / "answer.md"
+    answer_path = workdir / "answer" / ANSWER_FILE_NAME
     if result == 0 and answer_path.is_file():
         print("\nAnswer\n")
         print(answer_path.read_text(encoding="utf-8").rstrip())

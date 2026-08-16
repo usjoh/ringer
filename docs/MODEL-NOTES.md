@@ -598,12 +598,12 @@ the fix and used the engine_args splice; later runs should use the `model` field
   third time. ⚠️ Those two failures land as 4 FAIL rows and drag the default
   scoreboard to 33%, which understates a model that completed every task it was
   actually served. ⚠️ **CORRECTION 2026-08-16:** this note first said
-  `models --attributable` "excludes them and shows 100%". It does show 100% —
-  but not because it identified the outage. On the DB read path the flag drops
-  EVERY failure (see "Process lessons (2026-08-16, --attributable is not
-  filtering what it says)"), so 100% there is not evidence of anything. Judge
-  this model from the corpus-1 result and the outage description above, not
-  from that flag. Full method, scoring caveats and the two invalid key items are under "Process lessons (2026-08-02, kc-model-audition)".
+  `models --attributable` "excludes them and shows 100%". It did show 100%, but
+  not for that reason — the flag was dropping EVERY failure on the DB read path
+  (see the 2026-08-16 process lessons below). Fixed in PR #38: these two tasks
+  are classed `unknown`, are genuinely excluded now, and the 100% over the one
+  task this model completed finally means what it claims. Any attributable
+  figure READ BEFORE PR #38 is still worthless. Full method, scoring caveats and the two invalid key items are under "Process lessons (2026-08-02, kc-model-audition)".
 
 ## claude-opus-4.8 via opencode (`openrouter/anthropic/claude-opus-4.8`)
 
@@ -679,20 +679,25 @@ the fix and used the engine_args splice; later runs should use the `model` field
   **Naming a path is not writing it.** Fixing only (1) would have left this run
   silent. Replaying the recorded check against the real config: 0 warnings
   before, 1 after.
-- ⚠️ **`./ringer.py models --attributable` is not filtering what it says it is
-  (found 2026-08-16, unfixed at time of writing).** `db_attempt_rows` never
-  SELECTs the `failure_class` column, so on the DB read path — the default —
-  every row reaches the filter with no class, `model_log_row_failure_class`
-  returns None, and `model_log_row_is_model_attributable` rejects it. Measured
-  on this machine: the log holds 371 attempts of which 137 are non-PASS, and
-  the flag "dropped 137 row(s)" — i.e. EVERY failure, not the unattributable
-  ones. All 33 model rows then read 100% first-try. The column is populated
-  correctly in both `runs.jsonl` and `ringer.db`; only the reader drops it, so
-  no rebuild fixes it. **Until that is fixed, do not cite an --attributable
-  rate as evidence for anything** — including the opus-5 correction recorded
-  above, and including the 2026-07-28 attributable figures elsewhere in this
-  file, which were taken before the DB read path existed and should be
-  re-derived rather than trusted.
+- ⚠️ **`./ringer.py models --attributable` was reporting the opposite of the
+  evidence (found 2026-08-16, FIXED in PR #38).** `db_attempt_rows` never
+  SELECTed the `failure_class` column, so on the DB read path — the default —
+  every row reached the filter with no class, `model_log_row_failure_class`
+  returned None, and `model_log_row_is_model_attributable` rejected it.
+  Measured here: 371 attempts, 137 non-PASS, and the flag announced "dropped
+  137 row(s)" — EVERY failure, not the unattributable ones — after which all 33
+  model rows read 100% first-try. A filter sold as removing failures no model
+  caused was removing the model's failures too, and printed a reassuring count
+  while doing it. The column was populated correctly in both `runs.jsonl` and
+  `ringer.db` the whole time; only the reader dropped it, which is why no
+  rebuild ever fixed it and why the JSONL fallback path was right while the
+  default was wrong. Post-fix it drops 46 (2 engine-error + 44 unknown),
+  matching the JSONL path. **Any attributable rate read BEFORE PR #38 is
+  worthless** — including the 2026-07-28 attributable figures elsewhere in this
+  file, which should be re-derived rather than trusted. The lesson that
+  outlives the bug: a filter that reports how much it removed can still be
+  removing the wrong things, so check the retained DISTRIBUTION — a uniform
+  100% across every model is not a result, it is a symptom.
 - Standing conclusion: this file now carries three distinct false-model-failure
   classes — check-strictness (GLM's wrapped bullets), path-contract
   (lou-call-transcript, and this run), and infrastructure (opus-5's OpenRouter

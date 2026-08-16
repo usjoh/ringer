@@ -1640,6 +1640,10 @@ class TaskSpec:
     engine: str = DEFAULT_ENGINE_NAME
     expect_files: tuple[str, ...] = ()
     timeout_s: int = DEFAULT_TIMEOUT_S
+    # Kill timer for the CHECK, separate from timeout_s (the worker's). A real
+    # build-and-test gate outruns the 60s default and was being reported as
+    # TIMEOUT with no way to raise it.
+    check_timeout_s: int = CHECK_TIMEOUT_S
     max_attempts: int = 2
     redact_spec: bool = False
     full_access: bool = False
@@ -1677,6 +1681,9 @@ class TaskSpec:
         timeout_s = int(obj.get("timeout_s", DEFAULT_TIMEOUT_S))
         if timeout_s <= 0:
             raise ValueError(f"task {key}: timeout_s must be positive")
+        check_timeout_s = int(obj.get("check_timeout_s", CHECK_TIMEOUT_S))
+        if check_timeout_s <= 0:
+            raise ValueError(f"task {key}: check_timeout_s must be positive")
         # Strict on the fields this release introduces: `1.5` silently
         # truncating to 1 would remove the retry without saying so, and a
         # string is never what the author meant.
@@ -1708,6 +1715,7 @@ class TaskSpec:
             engine=engine,
             expect_files=tuple(str(item) for item in expect_files),
             timeout_s=timeout_s,
+            check_timeout_s=check_timeout_s,
             max_attempts=max_attempts,
             redact_spec=require_bool(obj.get("redact_spec", False), key, "redact_spec"),
             full_access=bool(obj.get("full_access", False)),
@@ -9099,7 +9107,9 @@ def run_models_command(config: AppConfig, args: argparse.Namespace) -> int:
 class Verifier:
     async def verify(self, task: TaskSpec, taskdir: Path) -> VerifyResult:
         if taskdir.is_dir():
-            check_returncode, check_timed_out, output = await self._run_check(task.check, taskdir)
+            check_returncode, check_timed_out, output = await self._run_check(
+                task.check, taskdir, timeout_s=task.check_timeout_s
+            )
         else:
             # A worker can delete or replace its own taskdir (seen live
             # 2026-07-09); spawning the check there raises ENOENT, and
@@ -9163,7 +9173,12 @@ class Verifier:
         return candidate if candidate.is_absolute() else taskdir / candidate
 
     @staticmethod
-    async def _run_check(command: str, cwd: Path) -> tuple[int | None, bool, str]:
+    async def _run_check(
+        command: str, cwd: Path, *, timeout_s: int | None = None
+    ) -> tuple[int | None, bool, str]:
+        # None defers to the module global so callers that never had a
+        # per-task timer (and tests that monkeypatch it) keep working.
+        limit = CHECK_TIMEOUT_S if timeout_s is None else timeout_s
         try:
             proc = await asyncio.create_subprocess_shell(
                 command,
@@ -9179,7 +9194,7 @@ class Verifier:
             return None, False, f"[ringer] check spawn failed: {exc}"
         timed_out = False
         try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=CHECK_TIMEOUT_S)
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=limit)
         except asyncio.TimeoutError:
             timed_out = True
             terminate_process_group(proc)
@@ -9190,7 +9205,7 @@ class Verifier:
                 stdout, _ = await proc.communicate()
         output = stdout.decode("utf-8", errors="replace") if stdout else ""
         if timed_out:
-            output += f"\n[ringer.py] check timed out after {CHECK_TIMEOUT_S}s\n"
+            output += f"\n[ringer.py] check timed out after {limit}s\n"
         return proc.returncode, timed_out, output
 
 

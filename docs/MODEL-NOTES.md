@@ -111,6 +111,15 @@ checks and raw logs support — no vibes, no worker self-reports.
   checklist at the TOP of fix specs with multiple sub-fixes.
 
 ## glm-5.2 via opencode (`openrouter/z-ai/glm-5.2`)
+- 2026-08-16 (re-derived with the fixed `--attributable`, PR #38): **code-review
+  is 33% first-try raw / 44% attributable over n=18 — this model's largest
+  sample here, and materially worse than the 50%/60% previously circulated.**
+  code-fix holds at 38%/83% (n=8/6), docs 80% (n=5), probe 75% (n=4). Read that
+  code-review number before handing it a review lane: the cheap-intelligence
+  case is strong for mechanical and docs work and weak for judgment work, and
+  the earlier figures overstated the latter. Full table and the correction
+  story under "Process lessons (2026-08-16, re-deriving the attributable
+  scoreboard)".
 - 2026-07-18 (sextant, q5-phase2-stage-a, exploration slot): code-review (contract-conformance, doc-vs-doc) — substance GOOD: 2 real findings (an exit-code rendering ambiguity, a Stage-B strip omission), both absorbed into the shipped fix; huge reasoning trace, careful quote-both-sides evidence. Marked FAIL by the stock review-swarm check: its Summary rule counts non-empty LINES (max 3) and GLM's 3 bullets wrapped to 6 lines. Check-strictness class (strict-on-format), not a model failure. Retry did not fix it (same wrapping). If reusing the stock check with verbose models, either widen the line rule or spec single-line bullets explicitly.
 
 - The cheap-intelligence default (~$0.74/M in, $2.33/M out, 2026-07 —
@@ -197,6 +206,12 @@ checks and raw logs support — no vibes, no worker self-reports.
 
 ## kimi-k2.7 via opencode (`openrouter/moonshotai/kimi-k2.7-code`)
 
+- 2026-08-16 (re-derived with the fixed `--attributable`, PR #38): code-review
+  50% first-try raw / 67% attributable (n=8/6) — better than the 33%/57%
+  previously circulated, and slightly ahead of glm-5.2 on the same task_type
+  (33%/44%, n=18) though on less than half the sample. Both trail gpt-5.6-sol's
+  77% over n=90. Full table under "Process lessons (2026-08-16, re-deriving the
+  attributable scoreboard)".
 - 2026-07-06 — adversarial pre-merge review (aicred spark): passed on
   attempt 1, ~83k tokens. First real outing; promising for review work.
   (Ran through an ad-hoc copy of the opencode engine block — the per-task
@@ -705,3 +720,50 @@ the fix and used the engine_args splice; later runs should use the `model` field
   scoreboard cannot separate them on its own. The eval row's
   `worker_returncode`, `check_returncode` and `missing_expect_files` are what
   separate them; read those three before routing.
+
+## Process lessons (2026-08-16, re-deriving the attributable scoreboard)
+
+- 2026-08-16: with `--attributable` fixed (PR #38), every attributable figure
+  taken before that fix was re-derived from `runs.jsonl` using ringer's own
+  math (`models --log <window> --db <scratch> --json`, default and
+  `--attributable`). The four figures that had been circulating from 2026-07-28
+  were compared against both the historical window (attempts logged on or
+  before 2026-07-28) and the full log; **both windows return identical numbers
+  for every pair, because none of these (model, task_type) pairs has been
+  exercised since.** So these are current, not merely historical.
+
+  | model / task_type | circulated 07-28 | re-derived raw | re-derived attributable |
+  |---|---|---|---|
+  | gpt-5.6-sol / probe | 27% → 100% | 43% (n=7) | **100% (n=3)** |
+  | glm-5.2 / code-fix | 38% → 83% | 38% (n=8) | **83% (n=6)** |
+  | kimi-k2.7-code / code-review | 33% → 57% | 50% (n=8) | **67% (n=6)** |
+  | glm-5.2 / code-review | 50% → 60% | 33% (n=18) | **44% (n=18)** |
+
+- **Only glm-5.2/code-fix reproduced exactly.** The attributable side was
+  broadly right (gpt-5.6-sol probe's 100% over 3/3 matches to the task), but the
+  raw side was wrong in both directions, and glm-5.2/code-review — the largest
+  glm sample at n=18 — was overstated on BOTH sides: 50%/60% circulated against
+  33%/44% actual. That is the one with routing consequences, and it is recorded
+  under the model's own heading.
+- The exact 2026-07-28 snapshot is NOT reproducible and no attempt was made to
+  fake it: the note then cited a 159-attempt log, the same-day window now holds
+  179, and a later `db rebuild` purged 4 fixture rows. Whether the originals
+  were miscomputed or merely taken from a smaller window cannot be settled from
+  here. What is settled is what the numbers are NOW, which is what routing
+  needs.
+- Current picture at n>=3, raw → attributable: gpt-5.6-sol code-review 77% →
+  77% (n=90, the largest sample in the log and completely unmoved by
+  attribution — no non-model failures in it at all); gpt-5.6-sol bakeoff 100%
+  (n=7); gpt-5.6-sol docs 100% (n=3); glm-5.2 docs 80% (n=5); glm-5.2 probe 75%
+  (n=4); deepseek-v3.2 code-review 20% (n=5). A zero delta means attribution
+  found nothing to excuse — treat those raw numbers as the model's own record.
+- ⚠️ Method trap for anyone repeating this: `models --json --attributable`
+  emits the "dropped N row(s)" line to **stdout**, ahead of the JSON, so the
+  output does not parse. The orphaned-notes warning nearby is deliberately sent
+  to stderr with a comment saying it is "so --json stdout stays parseable" —
+  this one was missed. Strip the preamble before parsing, or fix the stream.
+- Standing rule this episode earns: **a derived number is only as good as the
+  last time someone re-derived it.** Four figures sat in the record for 19 days,
+  three of them wrong, cited as routing evidence the whole time. When a filter
+  or a scoreboard changes, re-derive what it produced — do not migrate the old
+  conclusions forward.

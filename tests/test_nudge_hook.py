@@ -162,6 +162,32 @@ class NudgeHookTests(unittest.TestCase):
         nudged = self.run_hook("pre-bash", self.pre_bash_payload("python3 run_eval_suite.py", "session-3"))
         self.assertNudged(nudged, "PreToolUse")
 
+    def test_pre_bash_keyword_must_be_in_script_name_not_directory(self) -> None:
+        # A directory that merely starts with a keyword must not match:
+        # "personal/" starts with "persona", "harness-eval/" with "harness".
+        for index, command in enumerate(
+            (
+                "python3 domains/personal/tools/inbox.py --ack",
+                "python3 /srv/app/domains/personal/artifacts/build.py",
+                "python3 tests/harness-eval/run_checks.py",
+                "node evals/run.mjs",
+            )
+        ):
+            with self.subTest(command=command):
+                silent = self.run_hook("pre-bash", self.pre_bash_payload(command, f"dir-{index}"))
+                self.assertSilent(silent)
+        # The keyword in the file name still nudges, whatever directory it is in.
+        for index, command in enumerate(
+            (
+                "python3 domains/personal/persona_sim.py",
+                "node tools/run-eval.mjs",
+                "python3 scripts/grader.py --all",
+            )
+        ):
+            with self.subTest(command=command):
+                nudged = self.run_hook("pre-bash", self.pre_bash_payload(command, f"file-{index}"))
+                self.assertNudged(nudged, "PreToolUse")
+
     def test_post_edit_exempts_lifecycle_metadata_yaml(self) -> None:
         yaml_paths = [
             f"/Users/x/Projects/meridian/kos/lifecycle/pattern-observations/PO-{i}.yaml" for i in range(9)

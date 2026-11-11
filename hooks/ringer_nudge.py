@@ -28,9 +28,12 @@ PROVIDER_RE = re.compile(
 # a probe that really calls a model still trips PROVIDER_RE on the command line.
 # The (?<![a-z0-9]) lookbehind keeps keywords token-initial so "eval" cannot
 # match inside "retrieval" (same feedback note).
+# [^\s/]* after the keyword keeps the match inside the script's own file name:
+# a keyword that only starts a directory ("personal/", "harness-eval/") says
+# nothing about the script under it, and fired on every tool in such a tree.
 HARNESS_RE = re.compile(
     r"\b(?:node|python3?|bun|deno)\s+\S*"
-    r"(?<![a-z0-9])(?:simulat|harness|persona|grader|eval)\S*"
+    r"(?<![a-z0-9])(?:simulat|harness|persona|grader|eval)[^\s/]*"
     r"\.(?:mjs|js|ts|py)\b",
     re.IGNORECASE,
 )
